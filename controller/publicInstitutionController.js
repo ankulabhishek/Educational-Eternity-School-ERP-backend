@@ -16,9 +16,16 @@ exports.getPublicInstitutionStatus = async (req, res, next) => {
       })
     }
 
-    const doc = await Instution.findOne({ Instution_Id: code })
-      .select('Status')
-      .lean()
+    // Exact match first (indexed), then case-insensitive fallback for legacy / migrated data
+    let doc = await Instution.findOne({ Instution_Id: code }).select('Status').lean()
+    if (!doc) {
+      const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      doc = await Instution.findOne({
+        Instution_Id: { $regex: new RegExp(`^${escaped}$`, 'i') },
+      })
+        .select('Status')
+        .lean()
+    }
 
     if (!doc) {
       return res.status(200).json({
