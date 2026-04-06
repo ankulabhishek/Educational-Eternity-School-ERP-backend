@@ -5,11 +5,10 @@ const express = require('express');
 const mongoose = require('mongoose');
 const morgan = require('morgan');
 const bodyParser = require('body-parser');
-const cors = require('cors');
 const compression = require('compression');
-const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
+const cors = require('cors');
 
 const { assertJwtConfigForEnvironment } = require('./utils/jwtConfig');
 
@@ -71,8 +70,8 @@ const inventoryRoute = require('./routes/inventoryRoute');
 const staffOnboardingRoute = require('./routes/staffOnboardingRoute');
 const sectionRoute = require('./routes/sectionRoute');
 const idCardRoute = require('./routes/idCardRoute');
-const publicInstitutionRoute = require('./routes/publicInstitutionRoute');
 const auditLogRoute = require('./routes/auditLogRoute');
+const { getPublicInstitutionStatus } = require('./controller/publicInstitutionController');
 
 // Import middleware
 const errorHandler = require('./middleware/errorHandler');
@@ -82,61 +81,27 @@ const auditLogger = require('./middleware/auditLogger');
 
 // Initialize Express app
 const app = express();
+app.disable('x-powered-by');
 
-// Security middleware
-app.use(helmet({
-  contentSecurityPolicy: false, // Disable for API
-  crossOriginEmbedderPolicy: false
-}));
-
-// CORS: multiple school clients — use ALLOWED_ORIGINS=comma,separated,urls or FRONTEND_URL for one origin
-const buildCorsOriginHandler = () => {
-  const list = (process.env.ALLOWED_ORIGINS || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (list.length > 0) {
-    return (origin, cb) => {
-      if (!origin) return cb(null, true);
-      if (list.includes(origin)) return cb(null, true);
-      cb(null, false);
-    };
-  }
-  const single = process.env.FRONTEND_URL;
-  if (single && single !== '*') {
-    return (origin, cb) => {
-      if (!origin) return cb(null, true);
-      if (origin === single) return cb(null, true);
-      cb(null, false);
-    };
-  }
-  if (process.env.NODE_ENV === 'production') {
-    // eslint-disable-next-line no-console
-    console.warn(
-      'CORS: Set ALLOWED_ORIGINS or FRONTEND_URL in production. Allowing any origin (legacy behaviour).'
-    );
-  }
-  return true;
-};
-
-const corsOptions = {
-  origin: buildCorsOriginHandler(),
-  credentials: true,
-  optionsSuccessStatus: 200,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+// Browsers still enforce CORS for cross-origin XHR/fetch; the only way to "allow everyone" is to
+// send these headers on every response and answer OPTIONS with 204 (no Express router OPTIONS).
+app.use(cors({
+  origin: '*', // or your frontend URL
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS','HEAD'],
   allowedHeaders: [
     'Content-Type',
     'Authorization',
+    'Accept',
     'X-Requested-With',
     'x-academic-year-id',
     'x-target-institution-code',
     'x-feature-name',
     'x-latitude',
     'x-longitude',
-    'x-request-id',
+    'x-request-id'
   ],
-};
-app.use(cors(corsOptions));
+  credentials: false // set true only if needed
+}));
 
 // Compression middleware (gzip)
 app.use(compression());
@@ -267,11 +232,14 @@ connectDB().then(() => {
   }
 });
 
-// API Routes
-const BASE_URL = process.env.BASE_URL || '/api';
+// API Routes (trim: spaced .env values like BASE_URL = /foo break path matching)
+const BASE_URL = String(process.env.BASE_URL || '/api').trim();
 
-// Public tenant check (no auth) — used by each school build on load / navigation
-app.use(`${BASE_URL}/public`, publicInstitutionRoute);
+// Public institution check — registered on app directly so deploys cannot miss it (same URL as frontend).
+app.get(`${BASE_URL}/public/institution-status`, getPublicInstitutionStatus);
+app.get(`${BASE_URL}/public/institution-ping`, (_req, res) => {
+  res.status(200).json({ success: true, message: 'public routes reachable', baseUrl: BASE_URL });
+});
 
 app.use(`${BASE_URL}/student`, studentRoutes);
 app.use(`${BASE_URL}/class`, classRoutes);
@@ -340,6 +308,7 @@ const server = app.listen(PORT, () => {
   logger.info(`Server is running on PORT: ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
   logger.info(`Base URL: ${BASE_URL}`);
+  logger.info(`Institution guard: GET ${BASE_URL}/public/institution-status`);
 });
 
 // Graceful shutdown
