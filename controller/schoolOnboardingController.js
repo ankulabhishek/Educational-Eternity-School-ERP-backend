@@ -1,6 +1,6 @@
 const Institution = require('../models/InstutionModel');
 const User = require('../models/User');
-const { AcademicYear } = require('../models/academicYearModel');
+const { AcademicYear, SystemSettings } = require('../models/academicYearModel');
 const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 const util = require('util');
@@ -47,57 +47,87 @@ const generateInstitutionId = async (institutionName, session = null) => {
 };
 
 /**
- * Validate onboarding request data
+ * Validate onboarding request data (must stay in sync with `onboardSchool` + Institution / User models).
+ *
+ * Required (after normalization in onboardSchool):
+ * - institutionName (≥3), email, contactNumber (≥10), state (≥2), district (≥2), address (≥10)
+ * - adminFirstName, adminLastName (≥2 each), adminEmail, adminPassword (≥8), adminPhone (≥10)
+ *
+ * Legacy clients may omit location; onboardSchool sets state/district/address to Pending placeholders.
  */
 const validateOnboardingData = (data) => {
   const errors = [];
-  
-  // Required fields
-  if (!data.institutionName || data.institutionName.trim().length < 3) {
+
+  const institutionName = (data.institutionName || '').trim();
+  const email = (data.email || '').trim();
+  const contactNumber = (data.contactNumber || '').trim();
+  const state = (data.state || '').trim();
+  const district = (data.district || '').trim();
+  const address = (data.address || '').trim();
+  const adminFirstName = (data.adminFirstName || '').trim();
+  const adminLastName = (data.adminLastName || '').trim();
+  const adminEmail = (data.adminEmail || '').trim();
+  const adminPhone = (data.adminPhone || '').trim();
+  const adminPassword = data.adminPassword;
+  const institutionUrl = (data.institutionUrl || '').trim();
+
+  if (institutionName.length < 3) {
     errors.push('Institution name is required (minimum 3 characters)');
   }
-  
-  if (!data.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     errors.push('Valid email is required');
   }
-  
-  if (!data.contactNumber || data.contactNumber.trim().length < 10) {
+
+  if (contactNumber.length < 10) {
     errors.push('Valid contact number is required (minimum 10 digits)');
   }
-  
-  if (!data.state || data.state.trim().length < 2) {
+
+  if (state.length < 2) {
     errors.push('State is required');
   }
-  
-  if (!data.district || data.district.trim().length < 2) {
+
+  if (district.length < 2) {
     errors.push('District is required');
   }
-  
-  if (!data.address || data.address.trim().length < 10) {
+
+  if (address.length < 10) {
     errors.push('Address is required (minimum 10 characters)');
   }
-  
-  // Admin user fields
-  if (!data.adminFirstName || data.adminFirstName.trim().length < 2) {
+
+  if (adminFirstName.length < 2) {
     errors.push('Admin first name is required (minimum 2 characters)');
   }
-  
-  if (!data.adminLastName || data.adminLastName.trim().length < 2) {
+
+  if (adminLastName.length < 2) {
     errors.push('Admin last name is required (minimum 2 characters)');
   }
-  
-  if (!data.adminEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.adminEmail)) {
+
+  if (!adminEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail)) {
     errors.push('Valid admin email is required');
   }
-  
-  if (!data.adminPassword || data.adminPassword.length < 8) {
+
+  if (!adminPassword || String(adminPassword).length < 8) {
     errors.push('Admin password is required (minimum 8 characters)');
   }
-  
-  if (!data.adminPhone || data.adminPhone.trim().length < 10) {
+
+  if (adminPhone.length < 10) {
     errors.push('Valid admin phone number is required (minimum 10 digits)');
   }
-  
+
+  if (!institutionUrl) {
+    errors.push('Institution URL is required');
+  } else {
+    try {
+      const parsedUrl = new URL(institutionUrl);
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        errors.push('Institution URL must start with http:// or https://');
+      }
+    } catch (e) {
+      errors.push('Valid institution URL is required');
+    }
+  }
+
   return errors;
 };
 
@@ -328,14 +358,15 @@ const onboardSchool = async (req, res) => {
       adminLastName: raw.adminLastName || fallbackLastName,
       adminEmail: raw.adminEmail || raw.adminUsername || '',
       adminPhone: raw.adminPhone || raw.contactNumber || raw.institutionPhone || '',
+      institutionUrl: pickFirstNonEmpty(raw, ['institutionUrl', 'url', 'institutionURL']),
       state: stateFromAliases,
       district: districtFromAliases,
       address: addressFromAliases,
     };
 
-    const stateOk = data.state.trim().length >= 2;
-    const districtOk = data.district.trim().length >= 2;
-    const addressOk = data.address.trim().length >= 10;
+    const stateOk = String(data.state || '').trim().length >= 2;
+    const districtOk = String(data.district || '').trim().length >= 2;
+    const addressOk = String(data.address || '').trim().length >= 10;
     const legacyInstitutionPayload =
       !!(raw.institutionName && (raw.institutionEmail || raw.email)) &&
       !stateOk &&
@@ -347,6 +378,22 @@ const onboardSchool = async (req, res) => {
       data.district = 'Pending';
       data.address = 'Address pending update by school admin.';
     }
+
+    // Normalize admin first/last: trim; empty string is falsy in JS so `||` above can drop last name.
+    // If last name is still missing but first name is valid, default last name so onboarding can complete.
+    let afn = String(data.adminFirstName ?? '').trim();
+    let aln = String(data.adminLastName ?? '').trim();
+    if (afn.length < 2) {
+      afn = String(fallbackFirstName || '').trim();
+    }
+    if (aln.length < 2) {
+      aln = String(fallbackLastName || '').trim();
+    }
+    if (aln.length < 2 && afn.length >= 2) {
+      aln = 'User';
+    }
+    data.adminFirstName = afn;
+    data.adminLastName = aln;
 
     // Validate input data
     const validationErrors = validateOnboardingData(data);
@@ -391,12 +438,19 @@ const onboardSchool = async (req, res) => {
     // Generate Institution ID
     const institutionId = await generateInstitutionId(data.institutionName);
 
-    const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
-    const customInstitutionUrl = String(data.institutionUrl || '').trim();
-    // Url is unique in DB; default login URL must differ per institution
-    const institutionPortalUrl =
-      customInstitutionUrl ||
-      `${frontendBase}/login?institution=${encodeURIComponent(institutionId)}`;
+    const institutionPortalUrl = String(data.institutionUrl || '').trim().replace(/\/$/, '');
+
+    const existingUrlInstitution = await Institution.findOne({
+      Url: institutionPortalUrl,
+    }).session(session);
+    if (existingUrlInstitution) {
+      await session.abortTransaction();
+      return res.status(409).json({
+        success: false,
+        message: 'Institution URL already exists. Please provide a unique URL',
+        code: 409,
+      });
+    }
 
     // Create Institution
     const institution = new Institution({
@@ -654,16 +708,31 @@ const listInstitutionsPublic = async (req, res) => {
       }
     });
 
+    const settingsRows = await SystemSettings.find({
+      InstutionCode: { $in: institutionCodes },
+    })
+      .select('InstutionCode Grand_Access Settings')
+      .lean();
+
+    const grandAccessByCode = {};
+    settingsRows.forEach((row) => {
+      grandAccessByCode[row.InstutionCode] = Boolean(
+        row.Grand_Access ?? row.Settings?.Grand_Access
+      );
+    });
+
     return res.json({
       success: true,
       message: 'Institutions retrieved successfully',
       code: 200,
       data: institutions.map((inst) => {
         const admin = adminByCode[inst.Instution_Id] || null;
+        const code = inst.Instution_Id;
         return {
           ...inst,
           AdminEmail: admin?.Email || null,
           AdminUserName: admin?.UserName || null,
+          Grand_Access: grandAccessByCode[code] ?? false,
         };
       }),
     });

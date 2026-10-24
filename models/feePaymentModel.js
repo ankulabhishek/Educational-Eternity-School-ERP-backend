@@ -49,6 +49,11 @@ const feePaymentSchema = new Schema(
     OtherFee: {
       type: String,
     },
+    /** JSON array of other-fee subtypes paid in this transaction */
+    OtherFeeBreakdown: {
+      type: String,
+      default: '',
+    },
     // Amounts
     PaidAmount: {
       type: String, // store as string but treat as number in logic
@@ -72,7 +77,12 @@ const feePaymentSchema = new Schema(
       type: String, // e.g. "2025-26"
     },
     FeeType: {
-      type: String, // e.g. Monthly, Admission, Transport, Other
+      type: String, // e.g. "Tuition Fee, Examination Fee" or legacy Monthly, Admission
+    },
+    /** Fee head keys collected in this transaction (e.g. TutionFee, ExamFee) */
+    SelectedFeeHeads: {
+      type: [String],
+      default: undefined,
     },
     // Payment meta
     PaymentMode: {
@@ -89,6 +99,17 @@ const feePaymentSchema = new Schema(
     },
     Status: {
       type: String, // Success, Pending, Failed
+    },
+    /** Paid = admin/accountant collection; Partial = any other user type */
+    CollectionStatus: {
+      type: String,
+      enum: ['Paid', 'Partial'],
+      default: 'Paid',
+      index: true,
+    },
+    CollectedByUserType: {
+      type: String,
+      default: '',
     },
     /** Student-initiated UPI/online payments awaiting staff verification */
     VerificationStatus: {
@@ -121,6 +142,29 @@ const feePaymentSchema = new Schema(
       default: '',
     },
     RejectionReason: {
+      type: String,
+      default: '',
+    },
+    /** Advance / prepaid fee — months covered by this payment */
+    IsAdvancePayment: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    AdvanceMonthsCovered: {
+      type: [String],
+      default: undefined,
+    },
+    AdvanceStartMonth: {
+      type: String,
+      default: '',
+    },
+    AdvanceCreditRemaining: {
+      type: String,
+      default: '0',
+    },
+    /** Monthly arrears before an advance payment (advance does not reduce arrears) */
+    PreviousPendingAtPayment: {
       type: String,
       default: '',
     },
