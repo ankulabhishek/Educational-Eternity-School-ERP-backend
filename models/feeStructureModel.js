@@ -110,7 +110,7 @@ const feeStructureSchema = new Schema(
   { timestamps: true }
 )
 
-feeStructureSchema.index({ InstutionId: 1, Class: 1, Section: 1 }, { unique: true })
+feeStructureSchema.index({ InstutionId: 1, Section: 1 }, { unique: true })
 
 const feePatmentModel = mongoose.model('feeStructure', feeStructureSchema)
 
