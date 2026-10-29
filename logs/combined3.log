@@ -1985,3 +1985,21 @@
 {"level":"info","message":"Institution guard: GET /EducationalEternity/public/institution-status","service":"educational-eternity-api","timestamp":"2026-10-29 09:26:31"}
 {"level":"info","message":"Health: GET /health or GET /EducationalEternity/health","service":"educational-eternity-api","timestamp":"2026-10-29 09:26:31"}
 {"level":"info","message":"Rate limit: disabled (RATE_LIMIT_DISABLED)","service":"educational-eternity-api","timestamp":"2026-10-29 09:26:31"}
+{"level":"info","message":"SIGTERM signal received: closing HTTP server","service":"educational-eternity-api","timestamp":"2026-10-29 10:00:34"}
+{"level":"info","message":"Connecting to MongoDB: mongodb+srv://***@cluster0.byh4bzb.mongodb.net/EducationalEternity?retryWrites=true&w=majority&appName=cluster0","service":"educational-eternity-api","timestamp":"2026-10-29 10:00:38"}
+{"level":"info","message":"Server listening on http://0.0.0.0:8001","service":"educational-eternity-api","timestamp":"2026-10-29 10:00:38"}
+{"level":"info","message":"Environment: development","service":"educational-eternity-api","timestamp":"2026-10-29 10:00:38"}
+{"level":"info","message":"Base URL: /EducationalEternity","service":"educational-eternity-api","timestamp":"2026-10-29 10:00:38"}
+{"level":"info","message":"Auth login: POST http://0.0.0.0:8001/EducationalEternity/login","service":"educational-eternity-api","timestamp":"2026-10-29 10:00:38"}
+{"level":"info","message":"Institution guard: GET /EducationalEternity/public/institution-status","service":"educational-eternity-api","timestamp":"2026-10-29 10:00:38"}
+{"level":"info","message":"Health: GET /health or GET /EducationalEternity/health","service":"educational-eternity-api","timestamp":"2026-10-29 10:00:38"}
+{"level":"info","message":"Rate limit: disabled (RATE_LIMIT_DISABLED)","service":"educational-eternity-api","timestamp":"2026-10-29 10:00:38"}
+{"level":"info","message":"SIGTERM signal received: closing HTTP server","service":"educational-eternity-api","timestamp":"2026-10-29 10:02:19"}
+{"level":"info","message":"Connecting to MongoDB: mongodb+srv://***@cluster0.byh4bzb.mongodb.net/EducationalEternity?retryWrites=true&w=majority&appName=cluster0","service":"educational-eternity-api","timestamp":"2026-10-29 10:02:22"}
+{"level":"info","message":"Server listening on http://0.0.0.0:8001","service":"educational-eternity-api","timestamp":"2026-10-29 10:02:22"}
+{"level":"info","message":"Environment: development","service":"educational-eternity-api","timestamp":"2026-10-29 10:02:22"}
+{"level":"info","message":"Base URL: /EducationalEternity","service":"educational-eternity-api","timestamp":"2026-10-29 10:02:22"}
+{"level":"info","message":"Auth login: POST http://0.0.0.0:8001/EducationalEternity/login","service":"educational-eternity-api","timestamp":"2026-10-29 10:02:22"}
+{"level":"info","message":"Institution guard: GET /EducationalEternity/public/institution-status","service":"educational-eternity-api","timestamp":"2026-10-29 10:02:22"}
+{"level":"info","message":"Health: GET /health or GET /EducationalEternity/health","service":"educational-eternity-api","timestamp":"2026-10-29 10:02:22"}
+{"level":"info","message":"Rate limit: disabled (RATE_LIMIT_DISABLED)","service":"educational-eternity-api","timestamp":"2026-10-29 10:02:22"}

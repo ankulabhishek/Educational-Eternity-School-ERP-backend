@@ -9,6 +9,15 @@ const feeStructureSchema = new Schema(
       type: String,
       index: true,
     },
+    /** Class code from this school's class record. Uniqueness uses this, not the class name. */
+    ClassCode: {
+      type: String,
+      index: true,
+    },
+    ClassId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Class',
+    },
     // Class label (required)
     Class: {
       type: String,
@@ -110,7 +119,13 @@ const feeStructureSchema = new Schema(
   { timestamps: true }
 )
 
-feeStructureSchema.index({ InstutionId: 1, Section: 1 }, { unique: true })
+feeStructureSchema.index(
+  { InstutionId: 1, ClassCode: 1, Section: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { ClassCode: { $type: 'string', $gt: '' } },
+  }
+)
 
 const feePatmentModel = mongoose.model('feeStructure', feeStructureSchema)
 
