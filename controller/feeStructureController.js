@@ -1,5 +1,6 @@
 const { response } = require('express')
 const feeStructureModel = require('../models/feeStructureModel')
+const ClassModel = require('../models/classModel')
 const {
   STANDARD_FEE_HEADS,
   normalizeFrequency,
@@ -88,30 +89,66 @@ const buildStructurePayload = (body, existing = null) => {
   }
 }
 
-const store = (req, res, next) => {
-  const payload = buildStructurePayload(req.body)
+let feeIndexesReady = false
 
-  const feeStructure = new feeStructureModel({
-    InstutionId: req.user.InstutionCode,
-    ...payload,
-  })
-  feeStructure
-    .save()
-    .then((response) => {
-      res.status(201).json({
-        success: true,
-        message: 'Fee structure saved successfully!',
-        code: 201,
-        data: response,
-      })
-    })
-    .catch((error) => {
-      res.status(500).json({
+const ensureFeeStructureIndexes = async () => {
+  if (feeIndexesReady) return
+  const indexes = await feeStructureModel.collection.indexes()
+  const legacyNames = ['Class_1', 'InstutionId_1_Class_1_Section_1']
+  for (const name of legacyNames) {
+    const index = indexes.find((item) => item.name === name && item.unique)
+    if (!index) continue
+    await feeStructureModel.collection.dropIndex(name)
+  }
+  feeIndexesReady = true
+}
+
+const resolveSchoolClass = async (instutionCode, classId) => {
+  if (!classId) return null
+  return ClassModel.findOne({ _id: classId, InstutionCode: instutionCode }).lean()
+}
+
+const duplicateFeeMessage = (error) => {
+  if (error?.code === 11000) {
+    return 'A fee structure already exists for this class and section in your school.'
+  }
+  return error.message
+}
+
+const store = async (req, res) => {
+  try {
+    await ensureFeeStructureIndexes()
+    const instutionCode = req.user.InstutionCode
+    const schoolClass = await resolveSchoolClass(instutionCode, req.body.ClassId)
+    if (!schoolClass) {
+      return res.status(400).json({
         success: false,
-        message: error.message,
-        code: 500,
+        message: 'Select a class from this school.',
+        code: 400,
       })
+    }
+    const payload = buildStructurePayload({
+      ...req.body,
+      Class: schoolClass.ClassName,
     })
+    const feeStructure = await feeStructureModel.create({
+      InstutionId: instutionCode,
+      ClassId: schoolClass._id,
+      ...payload,
+    })
+    res.status(201).json({
+      success: true,
+      message: 'Fee structure saved successfully!',
+      code: 201,
+      data: feeStructure,
+    })
+  } catch (error) {
+    res.status(error?.code === 11000 ? 400 : 500).json({
+      success: false,
+      message: duplicateFeeMessage(error),
+      code: error?.code === 11000 ? 400 : 500,
+    })
+  }
 }
 
 const show = async (req, res, next) => {
@@ -163,7 +200,17 @@ const update = async (req, res) => {
       })
     }
 
-    const payload = buildStructurePayload(req.body, existing)
+    await ensureFeeStructureIndexes()
+    const schoolClass = await resolveSchoolClass(req.user.InstutionCode, req.body.ClassId || existing.ClassId)
+    if (!schoolClass) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'Select a class from this school.',
+      })
+    }
+    const payload = buildStructurePayload({ ...req.body, Class: schoolClass.ClassName }, existing)
+    payload.ClassId = schoolClass._id
 
     const updated = await feeStructureModel.findByIdAndUpdate(
       id,
@@ -178,10 +225,10 @@ const update = async (req, res) => {
       data: updated,
     })
   } catch (error) {
-    res.status(500).json({
+    res.status(error?.code === 11000 ? 400 : 500).json({
       success: false,
-      message: error.message,
-      code: 500,
+      message: duplicateFeeMessage(error),
+      code: error?.code === 11000 ? 400 : 500,
     })
   }
 }
