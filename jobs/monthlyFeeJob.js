@@ -5,12 +5,15 @@ const FeeStructure = require('../models/feeStructureModel');
 const FeePayment = require('../models/feePaymentModel');
 const { AcademicYear } = require('../models/academicYearModel');
 const { logger } = require('../utils/logger');
+const { cache } = require('../utils/cache');
 const {
   getMarkedMonthlyHeads,
   computeDueContext,
   isMonthAdvanceCovered,
   getPreviousMonthlyPending,
   computeStudentTotalPayable,
+  structureForStudent,
+  stampStudentsWithRouteFees,
 } = require('../utils/feeHeads');
 const { serializeOtherFeeBreakdown } = require('../utils/otherFeeSubtypes');
 
@@ -72,6 +75,8 @@ const generateMonthlyFeesForInstitution = async (instCode) => {
     return result;
   }
 
+  await stampStudentsWithRouteFees(instCode, students);
+
   for (const s of students) {
     try {
       const className = s.Class;
@@ -99,6 +104,7 @@ const generateMonthlyFeesForInstitution = async (instCode) => {
         result.skippedCount += 1;
         continue;
       }
+      feeStructure = structureForStudent(feeStructure, s);
 
       const monthlyHeads = getMarkedMonthlyHeads(feeStructure);
       const monthlyAmount = monthlyHeads.reduce((sum, h) => sum + h.amount, 0);
@@ -189,10 +195,18 @@ const generateMonthlyFeesForInstitution = async (instCode) => {
         Status: 'Pending',
       });
 
-      await Student.updateOne(
-        { _id: s._id },
-        { OutstandingAmount: String(outstanding) }
-      );
+      if (!s.OutstandingAmountManual) {
+        await Student.updateOne(
+          { _id: s._id },
+          { OutstandingAmount: String(outstanding) }
+        );
+      }
+      cache.delete(`student:${s._id}`);
+      const reg = String(s.Registration_Number || '').trim();
+      if (reg) {
+        cache.delete(`student-reg:${reg}`);
+        cache.delete(`student-profile:${reg}`);
+      }
 
       result.generatedCount += 1;
       result.totalMonthlyAmount += monthlyAmount;

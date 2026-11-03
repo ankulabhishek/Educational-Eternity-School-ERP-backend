@@ -646,7 +646,7 @@ const update = (req, res, next) =>{
 // delete fee details  => Not required as of now
 
 const destroy = (req, res, next) =>{
-    let feeDetailId = req.body.Id
+    let feeDetailId = req.body.marksheetId || req.body.Id || req.query.marksheetId
     studentMarksheetModel.findByIdAndDelete(feeDetailId)
     .then(response => {
         console.log(response);
@@ -707,17 +707,20 @@ const generateMarksheets = async (req, res, next) => {
       ExamType,
     }
 
-    if (scope?.from && scope?.to) {
-      // Subject-wise marks entries are tied to ExamDate; filter by academic session.
-      searchCondition.ExamDate = { $gte: scope.from, $lte: scope.to }
-    }
-
+    const and = []
     if (SectionCode) {
-      searchCondition.SectionCode = SectionCode
-    } else {
-      // If no section specified, get all sections (empty string or null)
-      searchCondition.SectionCode = { $in: ['', null] }
+      and.push({ $or: [{ SectionCode }, { SectionCode: '' }, { SectionCode: null }] })
     }
+    if (scope?.from && scope?.to) {
+      and.push({
+        $or: [
+          { ExamDate: { $gte: scope.from, $lte: scope.to } },
+          { ExamDate: null },
+          { ExamDate: { $exists: false } },
+        ],
+      })
+    }
+    if (and.length) searchCondition.$and = and
 
     const allSubjectMarks = await examSubjectMarksModel.find(searchCondition).lean()
 
@@ -762,14 +765,28 @@ const generateMarksheets = async (req, res, next) => {
         }
 
         const studentData = studentMarksMap.get(studentId)
-        studentData.Marks.push({
+        const subjectStatus = mark.Status === 'Absent' ? 'Absent' : (mark.Status === 'Fail' ? 'Fail' : 'Pass')
+        const subjectRow = {
           Subject: subjectMark.Subject,
           total: subjectMark.MaxMarks,
-          Obtained: mark.Obtained,
-          status: mark.Status === 'Fail' ? 'Fail' : 'Pass',
-        })
-        studentData.totalMarks += subjectMark.MaxMarks
-        studentData.obtainedMarks += mark.Obtained
+          Obtained: mark.Status === 'Absent' ? 0 : mark.Obtained,
+          status: subjectStatus,
+        }
+        const existingIndex = studentData.Marks.findIndex((row) => row.Subject === subjectMark.Subject)
+        if (existingIndex >= 0) {
+          const previous = studentData.Marks[existingIndex]
+          const previousWasWholeClass = !studentData.sectionBySubject?.[subjectMark.Subject]
+          if (!(subjectMark.SectionCode && previousWasWholeClass)) continue
+          studentData.totalMarks -= Number(previous.total) || 0
+          studentData.obtainedMarks -= Number(previous.Obtained) || 0
+          studentData.Marks[existingIndex] = subjectRow
+        } else {
+          studentData.Marks.push(subjectRow)
+        }
+        if (!studentData.sectionBySubject) studentData.sectionBySubject = {}
+        studentData.sectionBySubject[subjectMark.Subject] = subjectMark.SectionCode || ''
+        studentData.totalMarks += subjectRow.total
+        studentData.obtainedMarks += subjectRow.Obtained
       }
     }
 
@@ -785,7 +802,7 @@ const generateMarksheets = async (req, res, next) => {
           : 0
         const totalCgpa = await calculateCGPA(percentage)
         const grade = await calculateGrade(percentage)
-        const status = studentData.Marks.some(m => m.status === 'Fail') ? 'Fail' : 'Pass'
+        const status = studentData.Marks.some((row) => row.status === 'Fail' || row.status === 'Absent') ? 'Fail' : 'Pass'
         const percentageStr = percentage.toFixed(2) + '%'
 
         // Check if marksheet already exists
@@ -811,7 +828,8 @@ const generateMarksheets = async (req, res, next) => {
           CGPA: totalCgpa,
           Year: year.toString(),
           Exam_type: ExamType,
-          Publish: false,
+          Publish: existingMarksheet ? existingMarksheet.Publish : false,
+          Remark: existingMarksheet?.Remark || '',
         }
 
         if (existingMarksheet) {

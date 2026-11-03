@@ -1,4 +1,7 @@
 const Timetable = require('../models/timetableModel');
+const classModel = require('../models/classModel');
+const studentModel = require('../models/studentModel');
+const { resolveOwnStudentRegistration } = require('../utils/studentPortalAccess');
 const { getPermissionSet } = require('./permissionAssinment');
 const cache = require('../utils/cache');
 const { logger } = require('../utils/logger');
@@ -155,25 +158,10 @@ const getByClassSection = async (req, res) => {
         }
 
         const timetables = await Timetable.find(query)
-            .sort({ Day: 1, Period: 1 })
+            .sort({ updatedAt: -1, Day: 1, Period: 1 })
             .lean();
 
-        // Group by day
-        const groupedByDay = {
-            Monday: [],
-            Tuesday: [],
-            Wednesday: [],
-            Thursday: [],
-            Friday: [],
-            Saturday: [],
-            Sunday: []
-        };
-
-        timetables.forEach(tt => {
-            if (groupedByDay[tt.Day]) {
-                groupedByDay[tt.Day].push(tt);
-            }
-        });
+        const groupedByDay = groupLatest(timetables);
 
         return res.status(200).json({
             code: 200,
@@ -248,11 +236,18 @@ const store = async (req, res) => {
         } = req.body;
 
         // Validate required fields
-        if (!ClassCode || !ClassName || !Day || !Period || !StartTime || !EndTime || !Subject || !Session) {
+        const classInfo = await classModel.findOne({
+            InstutionCode: instutionCode,
+            ClassCode: ClassCode,
+        }).select('ClassName Session').lean();
+        const sessionValue = (Session && String(Session).trim()) || classInfo?.Session || `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`;
+        const classNameValue = (ClassName && String(ClassName).trim()) || classInfo?.ClassName || '';
+
+        if (!ClassCode || !classNameValue || !Day || !Period || !StartTime || !EndTime || !Subject) {
             return res.status(400).json({
                 code: 400,
                 success: false,
-                message: 'Missing required fields: ClassCode, ClassName, Day, Period, StartTime, EndTime, Subject, Session'
+                message: 'Choose the class, day, period, time and subject'
             });
         }
 
@@ -302,7 +297,7 @@ const store = async (req, res) => {
         const timetableData = {
             InstutionCode: instutionCode,
             ClassCode: ClassCode.trim(),
-            ClassName: ClassName.trim(),
+            ClassName: classNameValue,
             SectionCode: (SectionCode && SectionCode.trim() !== '') ? SectionCode.trim() : '',
             SectionName: (SectionName && SectionName.trim() !== '') ? SectionName.trim() : '',
             Day: Day,
@@ -314,7 +309,7 @@ const store = async (req, res) => {
             Teacher_Name: (Teacher_Name && Teacher_Name.trim() !== '') ? Teacher_Name.trim() : '',
             Teacher_Id: teacherIdValue,
             Room: (Room && Room.trim() !== '') ? Room.trim() : '',
-            Session: Session.trim(),
+            Session: sessionValue,
             Status: true
         };
 
@@ -608,12 +603,171 @@ const show = async (req, res) => {
     }
 };
 
+const emptyWeek = () => ({
+    Monday: [],
+    Tuesday: [],
+    Wednesday: [],
+    Thursday: [],
+    Friday: [],
+    Saturday: [],
+    Sunday: [],
+});
+
+const groupLatest = (rows) => {
+    const grouped = emptyWeek();
+    const seen = new Set();
+    rows.forEach((row) => {
+        const key = `${row.Day}-${row.Period}`;
+        if (!grouped[row.Day] || seen.has(key)) return;
+        seen.add(key);
+        grouped[row.Day].push(row);
+    });
+    Object.values(grouped).forEach((list) => list.sort((a, b) => a.Period - b.Period));
+    return grouped;
+};
+
+const saveWeek = async (req, res) => {
+    try {
+        const permissionsResult = await getPermissionSet(req).catch(() => ({ timetable: 'R-W-E-D-RA' }));
+        const canWrite = String(permissionsResult?.timetable || '').split('-').includes('W');
+        if (!canWrite) {
+            return res.status(403).json({ success: false, code: 403, message: 'You cannot change the timetable' });
+        }
+        const classCode = String(req.body.ClassCode || '').trim();
+        const periods = Array.isArray(req.body.periods) ? req.body.periods : [];
+        if (!classCode || !periods.length) {
+            return res.status(400).json({ success: false, code: 400, message: 'Choose a class and fill at least one period' });
+        }
+        const classInfo = await classModel.findOne({
+            InstutionCode: req.user.InstutionCode,
+            ClassCode: classCode,
+        }).select('ClassName Session').lean();
+        if (!classInfo) {
+            return res.status(404).json({ success: false, code: 404, message: 'Class not found' });
+        }
+        const sectionCode = String(req.body.SectionCode || '').trim();
+        const sectionName = String(req.body.SectionName || '').trim();
+        const session = classInfo.Session || `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`;
+        let saved = 0;
+        let removed = 0;
+
+        for (const period of periods) {
+            const day = period.Day;
+            const periodNumber = parseInt(period.Period, 10);
+            if (!day || !periodNumber) continue;
+            const sectionQuery = sectionCode
+                ? { SectionCode: sectionCode }
+                : { $or: [{ SectionCode: '' }, { SectionCode: null }, { SectionCode: { $exists: false } }] };
+            const existing = await Timetable.findOne({
+                InstutionCode: req.user.InstutionCode,
+                ClassCode: classCode,
+                Day: day,
+                Period: periodNumber,
+                ...sectionQuery,
+            });
+            const subject = String(period.Subject || '').trim();
+            if (!subject) {
+                if (existing) {
+                    await Timetable.deleteOne({ _id: existing._id });
+                    removed += 1;
+                }
+                continue;
+            }
+            const teacherId = period.Teacher_Id && mongoose.Types.ObjectId.isValid(period.Teacher_Id)
+                ? new mongoose.Types.ObjectId(period.Teacher_Id)
+                : null;
+            const payload = {
+                InstutionCode: req.user.InstutionCode,
+                ClassCode: classCode,
+                ClassName: classInfo.ClassName,
+                SectionCode: sectionCode,
+                SectionName: sectionName,
+                Day: day,
+                Period: periodNumber,
+                StartTime: String(period.StartTime || '').trim(),
+                EndTime: String(period.EndTime || '').trim(),
+                Subject: subject,
+                Teacher_Code: String(period.Teacher_Code || '').trim(),
+                Teacher_Name: String(period.Teacher_Name || '').trim(),
+                Teacher_Id: teacherId,
+                Room: String(period.Room || '').trim(),
+                Session: session,
+                Status: true,
+            };
+            if (!payload.StartTime || !payload.EndTime) {
+                return res.status(400).json({ success: false, code: 400, message: `Add a start and end time for period ${periodNumber}` });
+            }
+            if (existing) {
+                await Timetable.updateOne({ _id: existing._id }, { $set: payload });
+            } else {
+                await Timetable.create(payload);
+            }
+            saved += 1;
+        }
+
+        return res.status(200).json({
+            success: true,
+            code: 200,
+            message: 'Timetable saved',
+            data: { saved, removed },
+        });
+    } catch (error) {
+        logger.error('Error saving timetable week:', error);
+        return res.status(500).json({ success: false, code: 500, message: 'Could not save the timetable' });
+    }
+};
+
+const mine = async (req, res) => {
+    try {
+        const resolved = resolveOwnStudentRegistration(req);
+        if (resolved.error) {
+            return res.status(resolved.error.status).json({ success: false, code: resolved.error.status, message: resolved.error.message });
+        }
+        if (String(req.user?.UserType || '') !== 'Student') {
+            return res.status(403).json({ success: false, code: 403, message: 'Only a student can open their class timetable' });
+        }
+        const student = await studentModel.findOne({
+            InstutionCode: req.user.InstutionCode,
+            Registration_Number: resolved.registrationNumber,
+        }).select('Class Class_Code Section SectionCode').lean();
+        if (!student) {
+            return res.status(404).json({ success: false, code: 404, message: 'Student record not found' });
+        }
+        const query = {
+            InstutionCode: req.user.InstutionCode,
+            Status: true,
+            $or: [
+                { ClassCode: student.Class_Code || '' },
+                { ClassName: student.Class || '' },
+            ],
+        };
+        let rows = await Timetable.find(query).sort({ updatedAt: -1 }).lean();
+        if (student.SectionCode || student.Section) {
+            const sectionRows = rows.filter((row) => row.SectionCode === student.SectionCode || row.SectionName === student.Section);
+            if (sectionRows.length) rows = sectionRows;
+        }
+        return res.status(200).json({
+            success: true,
+            code: 200,
+            data: {
+                className: student.Class || '',
+                sectionName: student.Section || '',
+                timetable: groupLatest(rows),
+            },
+        });
+    } catch (error) {
+        return res.status(500).json({ success: false, code: 500, message: 'Could not load your timetable' });
+    }
+};
+
 module.exports = {
     index,
     getByClassSection,
     store,
     update,
     destroy,
-    show
+    show,
+    saveWeek,
+    mine,
 };
 

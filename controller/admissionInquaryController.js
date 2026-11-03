@@ -2,7 +2,6 @@ const { response } = require('express')
 const admissionInquaryModel      = require('../models/admissionInquaryModel');
 const nodemailer = require('nodemailer');
 const { getPermissionSet } = require('./permissionAssinment');
-const { resolveAcademicYearScope } = require('../utils/academicYearScope')
 
 const util = require('util');
 
@@ -35,28 +34,22 @@ const index = async (req, res, next) => {
       InstutionId: req.user.InstutionCode
     };
 
-    // Academic year range filter for Date field (Date is stored as Date in schema)
-    const scope = await resolveAcademicYearScope(req)
-    if (scope?.from && scope?.to) {
-      searchCondition.Date = { $gte: scope.from, $lte: scope.to }
-    }
-
     if (searchText) {
       searchCondition.$or = [
         { Phone_Number: { $regex: searchText, $options: 'i' } },
         { Class_Name: { $regex: searchText, $options: 'i' } },
         { First_Name: { $regex: searchText, $options: 'i' } },
+        { Last_Name: { $regex: searchText, $options: 'i' } },
+        { Email: { $regex: searchText, $options: 'i' } },
+        { Subject: { $regex: searchText, $options: 'i' } },
+        { Message: { $regex: searchText, $options: 'i' } },
         { State: { $regex: searchText, $options: 'i' } },
         { District: { $regex: searchText, $options: 'i' } },
-        { Gender: { $regex: searchText, $options: 'i' } },
-        { Date: { $regex: searchText, $options: 'i' } },
-        { InstutionCode: { $regex: searchText, $options: 'i' } }  // Corrected field added in $or
       ];
     }
 
-    // Fetch data
     const [admissionInquary, totalCount] = await Promise.all([
-      admissionInquaryModel.find(searchCondition).skip(skip).limit(limit),
+      admissionInquaryModel.find(searchCondition).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
       admissionInquaryModel.countDocuments(searchCondition)
     ]);
 
@@ -98,23 +91,47 @@ const store = async (req, res, next) => {
       }
     }
 
-    // Get the current date and time
-    const currentDate = new Date();
-    const date = currentDate.toLocaleDateString();  
+    const instutionId = String(
+      req.user?.InstutionCode || req.body.InstutionId || req.headers['x-target-institution-code'] || ''
+    ).trim();
+    if (!instutionId) {
+      return res.status(400).json({ success: false, code: 400, message: 'School could not be identified' });
+    }
+
+    const fullName = String(req.body.name || '').trim();
+    const nameParts = fullName.split(/\s+/).filter(Boolean);
+    const firstName = String(req.body.FirstName || nameParts[0] || '').trim();
+    const lastName = String(req.body.LastName || nameParts.slice(1).join(' ') || '').trim();
+    const email = String(req.body.email || req.body.Email || '').trim();
+    const phone = String(req.body.phone || req.body.PhoneNumber || '').trim();
+    const subject = String(req.body.subject || req.body.Subject || '').trim();
+    const message = String(req.body.message || req.body.Message || '').trim();
+    const source = String(req.body.Source || (message || subject ? 'Website' : 'Office')).trim();
+
+    if (source === 'Website' && (!firstName || !email || !message)) {
+      return res.status(400).json({ success: false, code: 400, message: 'Name, email, and message are required' });
+    }
+    if (!firstName) {
+      return res.status(400).json({ success: false, code: 400, message: 'Name is required' });
+    }
 
     let admissionInquaries = new admissionInquaryModel({
-        InstutionId: req.user?.InstutionCode || req.body.InstutionId, 
-        Phone_Number: req.body.PhoneNumber,
-        Class_Name: req.body.ClassName, 
-        First_Name: req.body.FirstName, 
-        Last_Name: req.body.LastName, 
-        Address: req.body.Address, 
-        State: req.body.State, 
-        District: req.body.District, 
-        Father_Name: req.body.FatherName, 
-        Other_Phone_Number: req.body.OtherPhoneNumber, 
-        Gender: req.body.Gender, 
-        Date: date
+        InstutionId: instutionId,
+        Phone_Number: phone,
+        Class_Name: req.body.ClassName || '',
+        First_Name: firstName,
+        Last_Name: lastName,
+        Address: req.body.Address || '',
+        State: req.body.State || '',
+        District: req.body.District || '',
+        Father_Name: req.body.FatherName || '',
+        Other_Phone_Number: req.body.OtherPhoneNumber || '',
+        Gender: req.body.Gender || '',
+        Email: email,
+        Subject: subject,
+        Message: message,
+        Source: source,
+        Date: new Date()
     })
     
     const saved = await admissionInquaries.save();
@@ -150,31 +167,32 @@ const store = async (req, res, next) => {
   }
 }
 
-const getEnquiriesRec = async(req, res, next) => {
-  let admissionRecord;
-     admissionRecord = await admissionInquaryModel.find({
-        InstutionCode: req.user.InstutionCode
-    })
-    
-    .then(response =>{
-        
-        res.status(201).json({
-            success: true,
-            message: 'Inquary fetched Successfully!',
-            code: 201,
-            data: admissionRecord
-        });
-    })
-    .catch(error => {
-      console.log(error.message)
-        res.status(500).json({
-            success: false,
-            message: error.message,
-            code: 500,
-        });
-    })
-
-
+const getEnquiriesRec = async (req, res) => {
+  try {
+    const permissionsResult = await getPermissionSet(req);
+    const allowedRoles = ['Admin', 'Admission Staff', 'Reception Staff', 'SuperAdmin'];
+    if (!allowedRoles.includes(req.user?.UserType) &&
+        !permissionsResult.admissionInquary?.split('-').includes('R')) {
+      return res.status(403).json({
+        success: false,
+        code: 403,
+        message: 'You cannot view inquiries',
+      });
+    }
+    const rows = await admissionInquaryModel.find({ InstutionId: req.user.InstutionCode })
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .lean();
+    return res.status(200).json({
+      success: true,
+      code: 200,
+      message: 'Inquiries fetched successfully',
+      totalRecords: rows.length,
+      data: rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, code: 500, message: 'Could not load inquiries' });
+  }
 }
 
 

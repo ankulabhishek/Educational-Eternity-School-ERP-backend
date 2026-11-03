@@ -70,7 +70,58 @@ const listAuditLogs = async (req, res) => {
   }
 }
 
+const kolkataBound = (day, endOfDay) => {
+  const value = String(day || '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
+  const stamp = endOfDay ? 'T23:59:59.999+05:30' : 'T00:00:00.000+05:30'
+  const date = new Date(`${value}${stamp}`)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+const clearAuditLogs = async (req, res) => {
+  try {
+    const instutionCode = String(req.user?.InstutionCode || '').trim()
+    if (!instutionCode || instutionCode.toLowerCase() === 'system') {
+      return res.status(400).json({
+        success: false,
+        message: 'Open a school before clearing activity',
+      })
+    }
+    const from = kolkataBound(req.body.from || req.query.from, false)
+    const to = kolkataBound(req.body.to || req.query.to, true)
+    if (!from || !to) {
+      return res.status(400).json({
+        success: false,
+        message: 'Choose a start date and an end date',
+      })
+    }
+    if (from > to) {
+      return res.status(400).json({
+        success: false,
+        message: 'The start date must be on or before the end date',
+      })
+    }
+    const result = await AuditLog.deleteMany({
+      InstutionCode: instutionCode,
+      ActionAt: { $gte: from, $lte: to },
+    })
+    return res.status(200).json({
+      success: true,
+      message: result.deletedCount
+        ? `Cleared ${result.deletedCount} activity record${result.deletedCount === 1 ? '' : 's'}`
+        : 'No activity records in that date range',
+      data: { deleted: result.deletedCount },
+    })
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Could not clear activity records',
+    })
+  }
+}
+
 module.exports = {
   listAuditLogs,
+  clearAuditLogs,
 }
 

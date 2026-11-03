@@ -5,6 +5,8 @@ const feePaymentModel = require('../models/feePaymentModel');
 const feeStructureModel = require('../models/feeStructureModel');
 const {
   findFeeStructureFromList,
+  structureForStudent,
+  stampStudentsWithRouteFees,
   computeStudentTotalPayable,
   currentMonthKey,
 } = require('../utils/feeHeads');
@@ -209,21 +211,44 @@ const applyLiveOutstanding = async (students, instutionId) => {
   });
 
   const month = currentMonthKey();
+  await stampStudentsWithRouteFees(tenantId, tenantStudents);
+  const writes = [];
   tenantStudents.forEach((s) => {
-    if (s._storedOutstanding === undefined) {
-      s._storedOutstanding = s.OutstandingAmount;
-    }
-    const structure = findFeeStructureFromList(structures, s.Class, s.Section || '');
+    if (s.OutstandingAmountManual) return
+    const storedOutstanding = s.OutstandingAmount;
+    const structure = structureForStudent(
+      findFeeStructureFromList(structures, s.Class, s.Section || ''),
+      s
+    );
     const { outstanding } = computeStudentTotalPayable(
       structure,
       byReg.get(String(s.Registration_Number || '').trim()) || [],
       {
         month,
-        storedOutstanding: s._storedOutstanding,
+        storedOutstanding,
       }
     );
-    s.OutstandingAmount = String(outstanding);
+    const next = String(outstanding);
+    if (s._id && String(storedOutstanding ?? '') !== next) {
+      writes.push({
+        updateOne: {
+          filter: { _id: s._id },
+          update: { $set: { OutstandingAmount: next } },
+        },
+      });
+      const reg = String(s.Registration_Number || '').trim();
+      cache.delete(`student:${s._id}`);
+      if (reg) {
+        cache.delete(`student-reg:${reg}`);
+        cache.delete(`student-profile:${reg}`);
+      }
+    }
+    s.OutstandingAmount = next;
   });
+
+  if (writes.length) {
+    await studentModel.bulkWrite(writes, { ordered: false });
+  }
 
   return students;
 };
@@ -379,7 +404,7 @@ const getAllStudent = async (req, res, next) => {
 
   try {
     const classFilter = String(req.query.Class || '').trim();
-    const cacheKey = `student-list:v2:${req.user.InstutionCode}:${classFilter}`;
+    const cacheKey = `student-list:v3:${req.user.InstutionCode}:${classFilter}`;
     const cached = cache.get(cacheKey);
 
     if (cached) {
@@ -397,7 +422,7 @@ const getAllStudent = async (req, res, next) => {
 
     const studentRecord = await studentModel
       .find(query)
-      .select('First_Name Last_Name Registration_Number Class Section Contact_Number')
+      .select('First_Name Last_Name Registration_Number Class Section Contact_Number UsesTransport TransportMonthlyFee OutstandingAmount')
       .sort({ First_Name: 1 })
       .lean();
 
@@ -410,6 +435,9 @@ const getAllStudent = async (req, res, next) => {
         Class: student.Class || '',
         Section: student.Section || '',
         Contact_Number: student.Contact_Number || '',
+        UsesTransport: student.UsesTransport === true,
+        TransportMonthlyFee: student.TransportMonthlyFee || '0',
+        OutstandingAmount: student.OutstandingAmount || '0',
       };
     });
 
@@ -445,9 +473,10 @@ const show = async (req, res, next) => {
     const cached = cache.get(cacheKey);
 
     if (cached) {
-      await attachSignedUrlsToStudent(cached);
-      await applyLiveOutstanding(cached, req.user.InstutionCode);
-      return successResponse(res, cached, 'Student retrieved successfully');
+      const view = { ...cached };
+      await attachSignedUrlsToStudent(view);
+      await applyLiveOutstanding(view, req.user.InstutionCode);
+      return successResponse(res, view, 'Student retrieved successfully');
     }
 
     const student = await studentModel
@@ -462,11 +491,9 @@ const show = async (req, res, next) => {
       return errorResponse(res, 'Student not found', 404);
     }
 
+    cache.set(cacheKey, { ...student }, 300);
     await attachSignedUrlsToStudent(student);
     await applyLiveOutstanding(student, req.user.InstutionCode);
-
-    // Cache for 5 minutes
-    cache.set(cacheKey, student, 300);
 
     return successResponse(res, student, 'Student retrieved successfully');
 
@@ -491,8 +518,9 @@ const getStudentByRegisterationNumber = async (req, res, next) => {
     const cached = cache.get(cacheKey);
 
     if (cached) {
-      await applyLiveOutstanding(cached, req.user.InstutionCode);
-      return successResponse(res, cached, 'Student retrieved successfully');
+      const view = { ...cached };
+      await applyLiveOutstanding(view, req.user.InstutionCode);
+      return successResponse(res, view, 'Student retrieved successfully');
     }
 
     const student = await studentModel
@@ -507,8 +535,8 @@ const getStudentByRegisterationNumber = async (req, res, next) => {
       return errorResponse(res, 'Student not found', 404);
     }
 
+    cache.set(cacheKey, { ...student }, 300);
     await applyLiveOutstanding(student, req.user.InstutionCode);
-    cache.set(cacheKey, student, 300);
 
     return successResponse(res, student, 'Student retrieved successfully');
 
@@ -537,9 +565,10 @@ const getStudentProfile = async (req, res, next) => {
     const cached = cache.get(cacheKey);
 
     if (cached) {
-      await attachSignedUrlsToStudent(cached);
-      await applyLiveOutstanding(cached, req.user.InstutionCode);
-      return successResponse(res, cached, 'Student profile retrieved successfully');
+      const view = { ...cached };
+      await attachSignedUrlsToStudent(view);
+      await applyLiveOutstanding(view, req.user.InstutionCode);
+      return successResponse(res, view, 'Student profile retrieved successfully');
     }
 
     const student = await studentModel
@@ -565,10 +594,9 @@ const getStudentProfile = async (req, res, next) => {
       ClassDetails: classDetails
     };
 
+    cache.set(cacheKey, { ...profile }, 300);
     await attachSignedUrlsToStudent(profile);
     await applyLiveOutstanding(profile, req.user.InstutionCode);
-
-    cache.set(cacheKey, profile, 300);
 
     return successResponse(res, profile, 'Student profile retrieved successfully');
 
@@ -1009,6 +1037,11 @@ const store = async (req, res, next) => {
   try {
     const studentData = req.body;
     studentData.InstutionCode = req.user.InstutionCode;
+    studentData.UsesTransport =
+      studentData.UsesTransport === true ||
+      studentData.UsesTransport === 'true' ||
+      studentData.UsesTransport === 1 ||
+      studentData.UsesTransport === '1';
 
     // Generate registration number if not provided
     if (!studentData.Registration_Number) {
@@ -1134,9 +1167,24 @@ const update = async (req, res, next) => {
     }
 
     const updateData = { ...req.body };
+    if (updateData.UsesTransport !== undefined) {
+      updateData.UsesTransport =
+        updateData.UsesTransport === true ||
+        updateData.UsesTransport === 'true' ||
+        updateData.UsesTransport === 1 ||
+        updateData.UsesTransport === '1';
+    }
     delete updateData.studentId;
     delete updateData._id;
     delete updateData.InstutionCode; // Prevent changing institution
+    const role = String(req.user?.UserType || '').trim().toLowerCase().replace(/\s+/g, '')
+    if (role === 'superadmin' && updateData.OutstandingAmount !== undefined) {
+      updateData.OutstandingAmount = String(updateData.OutstandingAmount || '0')
+      updateData.OutstandingAmountManual = true
+    } else {
+      delete updateData.OutstandingAmount
+      delete updateData.OutstandingAmountManual
+    }
 
     // Hash password if provided
     if (updateData.Password) {
@@ -1739,6 +1787,7 @@ const sendWelcomeEmail = async (student, institutionName) => {
 };
 
 module.exports = {
+  generateRegistrationNumber,
   index,
   getStudentStats,
   getAllStudent,

@@ -33,9 +33,14 @@ const teacherAttendanceSchema = new Schema(
     },
     FinalAttendanceStatus: {
       type: String,
-      enum: ['Pending', 'Present', 'Absent'],
+      enum: ['Pending', 'Present', 'Absent', 'Leave'],
       default: 'Pending',
       index: true,
+    },
+    MarkedBy: {
+      type: String,
+      enum: ['Teacher', 'Admin', 'Leave'],
+      default: 'Teacher',
     },
     ApprovedDayType: {
       type: String,

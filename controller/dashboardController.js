@@ -9,7 +9,7 @@ const examScheduleModel = require('../models/examScheduleModel')
 const announcementModel = require('../models/announcementModel')
 const marksheetModel = require('../models/studentMarksheetModel')
 const sectionModel = require('../models/sectionModel')
-const { findFeeStructureFromList, computeStudentTotalPayable, currentMonthKey } = require('../utils/feeHeads')
+const { findFeeStructureFromList, structureForStudent, stampStudentsWithRouteFees, computeStudentTotalPayable, currentMonthKey } = require('../utils/feeHeads')
 const { requireTenantInstitution } = require('../utils/institutionContext')
 
 const getDashboardData = async (req, res, next) => {
@@ -352,14 +352,18 @@ const getDashboardData = async (req, res, next) => {
 
             const studentsWithOutstanding = [];
             const outstandingMonth = currentMonthKey()
+            await stampStudentsWithRouteFees(instutionCode, studentRecord)
 
             for (const student of studentRecord) {
                 if (!student.Status) continue
 
-                const structure = findFeeStructureFromList(
-                    feeStructures,
-                    student.Class || '',
-                    student.Section || ''
+                const structure = structureForStudent(
+                    findFeeStructureFromList(
+                        feeStructures,
+                        student.Class || '',
+                        student.Section || ''
+                    ),
+                    student
                 )
 
                 const outstanding = computeStudentTotalPayable(

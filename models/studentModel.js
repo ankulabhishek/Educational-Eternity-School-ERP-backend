@@ -92,6 +92,21 @@ const studentSchema = new Schema({
         type: String,
         required: true
     },
+    /** When true, Super Admin set Total due and automatic fee maths must not replace it. */
+    OutstandingAmountManual: {
+        type: Boolean,
+        default: false,
+    },
+    /** When true, transport fee is billed for this student. */
+    UsesTransport: {
+        type: Boolean,
+        default: false,
+    },
+    /** Route fee used instead of the class transport fee when this student is assigned. */
+    TransportMonthlyFee: {
+        type: String,
+        default: '0',
+    },
     /** Unused advance fee credit (partial month remainder) */
     AdvanceFeeCredit: {
         type: String,

@@ -283,6 +283,19 @@ const login = async (req, res, next) => {
             isPasswordMatch = false;
         }
         if (!isPasswordMatch) {
+            req.user = {
+                userId: user._id,
+                Email: user.Email,
+                UserType: user.UserType,
+                InstutionCode: user.InstutionCode,
+            };
+            if (req.res) req.res.statusCode = 401;
+            createAuditLog({
+                req,
+                eventType: 'LOGIN_FAILED',
+                feature: 'Authentication',
+                meta: { login: false },
+            }).catch(() => {});
             return res.status(401).json({
                 success: false,
                 message: 'Invalid credentials',
@@ -320,9 +333,13 @@ const login = async (req, res, next) => {
             userId: user._id,
         }
 
-        if (!user.Verified) {
-            await User.findByIdAndUpdate(user._id, { $set: { Verified: true } });
-        }
+        await User.findByIdAndUpdate(user._id, {
+            $set: {
+                Verified: true,
+                LastLoginAt: new Date(),
+                LastLoginIp: req.ip || req.headers['x-forwarded-for'] || '',
+            },
+        });
         const accessSecret = getJwtAccessSecret();
         const refreshSecret = getJwtRefreshSecret();
         const token = jwt.sign(userTokenJSON, accessSecret, { expiresIn: tokenExpiry });

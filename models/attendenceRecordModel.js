@@ -7,6 +7,17 @@ const attendenceRecordSchema = new Schema({
     Class_Code:{
         type: String
     },
+    ClassName: {
+        type: String
+    },
+    SectionCode: {
+        type: String,
+        default: ''
+    },
+    SectionName: {
+        type: String,
+        default: ''
+    },
     Attendence : {
         type: Array
     },

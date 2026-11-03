@@ -65,7 +65,17 @@ const instutionSchema = new Schema({
    Status: {
     type: Boolean,
     required: true
-}
+},
+    Features: {
+        teacherAttendance: { type: Boolean, default: false },
+        leave: { type: Boolean, default: false },
+        transport: { type: Boolean, default: false },
+        hostel: { type: Boolean, default: false },
+        store: { type: Boolean, default: false },
+        assignment: { type: Boolean, default: false },
+        onlineExam: { type: Boolean, default: false },
+        library: { type: Boolean, default: false },
+    },
 },
 {timestamps:true}
 )

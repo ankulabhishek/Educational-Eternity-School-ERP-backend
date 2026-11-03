@@ -21,6 +21,7 @@ const authorize = (...allowedRoles) => {
 
     const userRole = req.user.UserType;
     const normalizedUserRole = normalizeRole(userRole);
+    if (normalizedUserRole === 'superadmin') return next();
     const normalizedAllowedRoles = allowedRoles.map(normalizeRole);
 
     if (!normalizedAllowedRoles.includes(normalizedUserRole)) {

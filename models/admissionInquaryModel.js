@@ -37,6 +37,22 @@ const admissionInquarySchema = new Schema({
     Gender:{
         type: String
     },
+    Email: {
+        type: String,
+        default: ''
+    },
+    Subject: {
+        type: String,
+        default: ''
+    },
+    Message: {
+        type: String,
+        default: ''
+    },
+    Source: {
+        type: String,
+        default: 'Office'
+    },
     Date:{
         type: Date
     }

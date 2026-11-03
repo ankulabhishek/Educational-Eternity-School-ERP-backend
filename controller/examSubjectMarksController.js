@@ -40,10 +40,19 @@ const index = async (req, res, next) => {
       searchCondition.Subject = { $regex: req.query.Subject, $options: 'i' }
     }
 
-    // Academic year view filter (uses ExamDate)
+    // Keep marks that belong to this academic year, and marks that were saved without a date.
     const scope = await resolveAcademicYearScope(req)
     if (scope?.from && scope?.to) {
-      searchCondition.ExamDate = { $gte: scope.from, $lte: scope.to }
+      searchCondition.$and = [
+        ...(searchCondition.$and || []),
+        {
+          $or: [
+            { ExamDate: { $gte: scope.from, $lte: scope.to } },
+            { ExamDate: null },
+            { ExamDate: { $exists: false } },
+          ],
+        },
+      ]
     }
 
     const [subjectMarks, totalCount] = await Promise.all([
@@ -103,7 +112,15 @@ const show = async (req, res, next) => {
 
     const scope = await resolveAcademicYearScope(req)
     if (scope?.from && scope?.to) {
-      searchCondition.ExamDate = { $gte: scope.from, $lte: scope.to }
+      searchCondition.$and = [
+        {
+          $or: [
+            { ExamDate: { $gte: scope.from, $lte: scope.to } },
+            { ExamDate: null },
+            { ExamDate: { $exists: false } },
+          ],
+        },
+      ]
     }
 
     if (SectionCode) {

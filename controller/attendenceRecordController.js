@@ -1,5 +1,6 @@
 const { response } = require('express')
 const attendenceRecordModel = require('../models/attendenceRecordModel')
+const classModel = require('../models/classModel')
 
 const { getPermissionSet } = require('./permissionAssinment');
 const studentModel         = require('../models/studentModel')
@@ -15,11 +16,44 @@ const isPresent = (val) => {
   return v === 'present' || v === 'p'
 }
 
-const tryParseDate = (val) => {
-  if (!val) return null
-  const d = new Date(val)
-  if (Number.isNaN(d.getTime())) return null
-  return d
+const dateKey = (date) => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const todayKey = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+
+const interpretations = (val) => {
+  const raw = String(val || '').trim()
+  if (!raw) return []
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (iso) return [new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]))]
+  const parts = raw.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/)
+  if (!parts) {
+    const parsed = new Date(raw)
+    if (Number.isNaN(parsed.getTime())) return []
+    return [new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate())]
+  }
+  const first = Number(parts[1])
+  const second = Number(parts[2])
+  const year = Number(parts[3])
+  const dates = []
+  if (second >= 1 && second <= 12 && first >= 1 && first <= 31) dates.push(new Date(year, second - 1, first))
+  if (first >= 1 && first <= 12 && second >= 1 && second <= 31) dates.push(new Date(year, first - 1, second))
+  return dates.filter((date) => date.getFullYear() === year && date.getMonth() >= 0)
+}
+
+const tryParseDate = (val) => interpretations(val)[0] || null
+
+const inRange = (stored, from, to) => interpretations(stored).some((date) => date >= from && date <= to)
+
+const canonicalDate = (stored) => {
+  const raw = String(stored || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10)
+  const parsed = tryParseDate(stored)
+  return parsed ? dateKey(parsed) : raw
 }
 
 const resolveAcademicYearRange = async (req, fromDate, toDate) => {
@@ -224,15 +258,13 @@ const getAllStudent = async (req, res, next) => {
     const attPerms =
       (permissionsResult.attendenceRecordModels && permissionsResult.attendenceRecordModels.split('-')) || []
     if(attPerms.includes('R')){
-        const query = {
-            Class: req.query.Class,
-            InstutionCode: req.user.InstutionCode
-        };
-
-        // Add section filter if provided
-        if (req.query.Section) {
-            query.SectionCode = req.query.Section;
-        }
+        const classKey = req.query.Class || req.query.ClassCode || ''
+        const sectionKey = req.query.Section || req.query.SectionCode || ''
+        const query = { InstutionCode: req.user.InstutionCode, Status: true }
+        const and = []
+        if (classKey) and.push({ $or: [{ Class: classKey }, { Class_Code: classKey }] })
+        if (sectionKey) and.push({ $or: [{ Section: sectionKey }, { SectionCode: sectionKey }] })
+        if (and.length) query.$and = and
 
         const studentRecord = await studentModel.find(query);
 
@@ -270,10 +302,9 @@ const store = async (req, res, next) => {
      (permissionsResult.attendenceRecordModels && permissionsResult.attendenceRecordModels.split('-')) || []
    if(attPermsStore.includes('W')){
 
-        // Get the current date and time
-        const currentDate = new Date();
-        const date = currentDate.toLocaleDateString();  
-        const time = currentDate.toLocaleTimeString(); 
+        const chosen = tryParseDate(req.body.Date)
+        const date = chosen ? dateKey(chosen) : todayKey()
+        const time = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' }) 
 
         // Resolve academic year for this attendance batch (optional)
         let academicYearId = null
@@ -291,7 +322,7 @@ const store = async (req, res, next) => {
             }
         }
 
-        if(req.body.InstutionId === ''){
+        if (!req.body.InstutionId) {
             req.body.InstutionId = req.user.InstutionCode
         }
 
@@ -299,31 +330,42 @@ const store = async (req, res, next) => {
             req.body.TeacherId = req.user.MemberId;
         }
 
-        for (let student of req.body.Attendance) {
-            const studentRecord = await studentModel.find({ Registration_Number: { $in: student.StudentId } });
-            if (studentRecord && studentRecord.length > 0) {
-                if(student.attendance === 'Present'){
-                let students = await updateStudentAttendence(studentRecord[0]._id, studentRecord[0].Attended_Classes + 1, studentRecord[0].Total_Classes + 1)
+        const marks = (Array.isArray(req.body.Attendance) ? req.body.Attendance : []).map((student) => ({
+            StudentId: student.StudentId,
+            StudentName: student.StudentName || '',
+            attendance: student.attendance === 'Present' || student.attendance === 'P' ? 'Present' : 'Absent',
+        }))
 
-                } else if(student.attendance === 'Absent'){
-            let students = await updateStudentAttendence(studentRecord[0]._id, studentRecord[0].Attended_Classes, studentRecord[0].Total_Classes + 1)
-                }
-            }
+        const classCode = req.body.ClassCode || ''
+        const subject = req.body.Subject || ''
+        const sectionCode = req.body.SectionCode || ''
+        const existingRecords = await attendenceRecordModel.find({
+            InstutionId: req.body.InstutionId,
+            Class_Code: classCode,
+            Subject: subject,
+        })
+        const existing = existingRecords.find((record) => canonicalDate(record.Date) === date && String(record.SectionCode || '') === String(sectionCode))
+
+        const payload = {
+            Class_Code: classCode,
+            ClassName: req.body.ClassName || '',
+            SectionCode: sectionCode,
+            SectionName: req.body.SectionName || '',
+            Attendence: marks,
+            Subject: subject,
+            Subject_Teacher: req.body.TeacherId,
+            InstutionId: req.body.InstutionId,
+            Date: date,
+            Time: time,
+            AcademicYearId: academicYearId,
+            AcademicYearName: academicYearName,
         }
-     
 
-    let attendence = new attendenceRecordModel({
-        Class_Code: req.body.ClassCode,
-        Attendence: req.body.Attendance,
-        Subject: req.body.Subject,
-        Subject_Teacher:  req.body.TeacherId,
-        InstutionId: req.body.InstutionId,
-        Date: date,
-        Time: time,
-        AcademicYearId: academicYearId,
-        AcademicYearName: academicYearName
-    })
-    attendence.save()
+        const saved = existing
+            ? attendenceRecordModel.findByIdAndUpdate(existing._id, { $set: payload }, { new: true })
+            : new attendenceRecordModel(payload).save()
+
+    saved
         .then(response => {
             res.status(200).json({
                 success: true,
@@ -413,7 +455,7 @@ const getStudentAttendance = async (req, res, next) => {
                 );
                 return {
                     _id: record._id,
-                    Date: record.Date,
+                    Date: canonicalDate(record.Date),
                     Time: record.Time,
                     ClassCode: record.Class_Code,
                     Subject: record.Subject,
@@ -487,11 +529,7 @@ const getAttendanceOverview = async (req, res, next) => {
         // Optional: date range filter from query or selected academic year header
         const range = await resolveAcademicYearRange(req, fromDate, toDate)
         if (range) {
-          records = records.filter((rec) => {
-            const d = tryParseDate(rec.Date)
-            if (!d) return false
-            return d >= range.from && d <= range.to
-          })
+          records = records.filter((rec) => inRange(rec.Date, range.from, range.to))
         }
 
         let totalMarks = 0
@@ -604,11 +642,7 @@ const getStudentAttendanceSummary = async (req, res, next) => {
           req.query.toDate
         )
         const filteredRecords = range
-          ? allRecords.filter((rec) => {
-            const d = tryParseDate(rec.Date)
-            if (!d) return false
-            return d >= range.from && d <= range.to
-          })
+          ? allRecords.filter((rec) => inRange(rec.Date, range.from, range.to))
           : allRecords
 
         const studentRecords = filteredRecords.filter(record => {
@@ -621,6 +655,7 @@ const getStudentAttendanceSummary = async (req, res, next) => {
         let totalSessions = 0
         let presentCount = 0
         let absentCount = 0
+        let leaveCount = 0
         const subjectMap = new Map()
 
         const attendanceList = studentRecords.map(record => {
@@ -629,13 +664,12 @@ const getStudentAttendanceSummary = async (req, res, next) => {
             )
             const status = studentAtt ? studentAtt.attendance : 'Absent'
             const present = isPresent(status)
+            const onLeave = String(status || '').toLowerCase() === 'leave'
 
             totalSessions += 1
-            if (present) {
-                presentCount += 1
-            } else {
-                absentCount += 1
-            }
+            if (present) presentCount += 1
+            else if (onLeave) leaveCount += 1
+            else absentCount += 1
 
             const subject = record.Subject || 'Unknown'
             if (!subjectMap.has(subject)) {
@@ -644,11 +678,11 @@ const getStudentAttendanceSummary = async (req, res, next) => {
             const s = subjectMap.get(subject)
             s.total += 1
             if (present) s.present += 1
-            else s.absent += 1
+            else if (!onLeave) s.absent += 1
 
             return {
                 _id: record._id,
-                Date: record.Date,
+                Date: canonicalDate(record.Date),
                 Time: record.Time,
                 ClassCode: record.Class_Code,
                 Subject: record.Subject,
@@ -692,6 +726,7 @@ const getStudentAttendanceSummary = async (req, res, next) => {
                     totalSessions,
                     presentCount,
                     absentCount,
+                    leaveCount,
                     attendancePercent: parseFloat(overallPercent.toFixed(1))
                 },
                 subjectWise,
@@ -710,6 +745,222 @@ const getStudentAttendanceSummary = async (req, res, next) => {
     }
 }
 
+const canReadAttendance = async (req) => {
+  const permissions = await getPermissionSet(req)
+  const parts = String(permissions?.attendenceRecordModels || '').split('-')
+  return parts.includes('R') || parts.includes('RA')
+}
+
+const getRegister = async (req, res) => {
+  try {
+    if (!(await canReadAttendance(req))) {
+      return res.status(403).json({ success: false, code: 403, message: 'You cannot view attendance' })
+    }
+    const instutionId = req.user.InstutionCode
+    let from
+    let to
+    if (req.query.date) {
+      from = tryParseDate(req.query.date)
+      to = from
+    } else if (/^\d{4}-\d{2}$/.test(String(req.query.month || ''))) {
+      const [year, month] = req.query.month.split('-').map(Number)
+      from = new Date(year, month - 1, 1)
+      to = new Date(year, month, 0)
+    } else if (req.query.fromDate && req.query.toDate) {
+      from = tryParseDate(req.query.fromDate)
+      to = tryParseDate(req.query.toDate)
+    } else {
+      const today = tryParseDate(todayKey())
+      from = new Date(today.getFullYear(), today.getMonth(), 1)
+      to = new Date(today.getFullYear(), today.getMonth() + 1, 0)
+    }
+    if (!from || !to) {
+      return res.status(400).json({ success: false, code: 400, message: 'Choose a valid day, month, or date range' })
+    }
+
+    const classKey = String(req.query.ClassCode || '').trim()
+    const sectionKey = String(req.query.SectionCode || '').trim()
+    const studentKey = String(req.query.student || '').trim().toLowerCase()
+    const classRecord = classKey
+      ? await classModel.findOne({ InstutionCode: instutionId, $or: [{ ClassCode: classKey }, { ClassName: classKey }] }).lean()
+      : null
+
+    const studentQuery = { InstutionCode: instutionId, Status: true }
+    const and = []
+    if (classRecord || classKey) {
+      and.push({
+        $or: [
+          { Class_Code: classRecord?.ClassCode || classKey },
+          { Class: classRecord?.ClassName || classKey },
+        ],
+      })
+    }
+    if (and.length) studentQuery.$and = and
+    let students = await studentModel.find(studentQuery)
+      .select('First_Name Last_Name Registration_Number Class Class_Code Section SectionCode')
+      .lean()
+    if (sectionKey) {
+      students = students.filter((student) => student.SectionCode === sectionKey || student.Section === sectionKey)
+    }
+    if (studentKey) {
+      students = students.filter((student) => {
+        const name = `${student.First_Name || ''} ${student.Last_Name || ''}`.toLowerCase()
+        return name.includes(studentKey) || String(student.Registration_Number || '').toLowerCase().includes(studentKey)
+      })
+    }
+
+    const classCodes = new Set([classKey, classRecord?.ClassCode, classRecord?.ClassName].filter(Boolean))
+    let records = await attendenceRecordModel.find({ InstutionId: instutionId }).lean()
+    records = records.filter((record) => inRange(record.Date, from, to))
+    if (classCodes.size) {
+      records = records.filter((record) => classCodes.has(record.Class_Code) || classCodes.has(record.ClassName))
+    }
+    const studentIds = new Set(students.map((student) => String(student.Registration_Number || '').toLowerCase()))
+    if (sectionKey) {
+      records = records.filter((record) => {
+        if (record.SectionCode && record.SectionCode === sectionKey) return true
+        if (record.SectionName && record.SectionName === sectionKey) return true
+        return (record.Attendence || []).some((mark) => studentIds.has(String(mark.StudentId || '').toLowerCase()))
+      })
+    }
+
+    const sessions = records.map((record) => {
+      const list = Array.isArray(record.Attendence) ? record.Attendence : []
+      const present = list.filter((mark) => isPresent(mark.attendance)).length
+      return {
+        id: record._id,
+        date: canonicalDate(record.Date),
+        subject: record.Subject || '',
+        present,
+        absent: list.length - present,
+        total: list.length,
+      }
+    }).sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.subject).localeCompare(String(b.subject)))
+
+    const studentRows = students.map((student) => {
+      const reg = String(student.Registration_Number || '').toLowerCase()
+      const days = []
+      records.forEach((record) => {
+        const mark = (record.Attendence || []).find((item) => String(item.StudentId || '').toLowerCase() === reg)
+        if (!mark) return
+        const rawStatus = String(mark.attendance || '')
+        days.push({
+          recordId: record._id,
+          date: canonicalDate(record.Date),
+          subject: record.Subject || '',
+          status: isPresent(rawStatus) ? 'Present' : rawStatus.toLowerCase() === 'leave' ? 'Leave' : 'Absent',
+        })
+      })
+      const present = days.filter((day) => day.status === 'Present').length
+      const conducted = days.length
+      return {
+        registrationNumber: student.Registration_Number,
+        name: `${student.First_Name || ''} ${student.Last_Name || ''}`.trim(),
+        className: student.Class || classRecord?.ClassName || '',
+        section: student.Section || '',
+        present,
+        conducted,
+        absent: conducted - present,
+        percent: conducted ? Math.round((present * 1000) / conducted) / 10 : 0,
+        days,
+      }
+    }).sort((a, b) => a.name.localeCompare(b.name))
+
+    const presentMarks = sessions.reduce((sum, session) => sum + session.present, 0)
+    const totalMarks = sessions.reduce((sum, session) => sum + session.total, 0)
+    res.status(200).json({
+      success: true,
+      code: 200,
+      data: {
+        from: dateKey(from),
+        to: dateKey(to),
+        singleDay: dateKey(from) === dateKey(to),
+        conducted: sessions.length,
+        presentMarks,
+        absentMarks: totalMarks - presentMarks,
+        percent: totalMarks ? Math.round((presentMarks * 1000) / totalMarks) / 10 : 0,
+        sessions,
+        students: studentRows,
+      },
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, code: 500, message: 'Could not load the attendance register' })
+  }
+}
+
+const isSuperAdminUser = (user) =>
+  String(user?.UserType || '').trim().toLowerCase().replace(/\s+/g, '') === 'superadmin'
+
+const updateStudentMark = async (req, res) => {
+  try {
+    if (!isSuperAdminUser(req.user)) {
+      return res.status(403).json({ success: false, message: 'Only a super admin can change an attendance record' })
+    }
+    const recordId = String(req.body.recordId || '').trim()
+    const studentId = String(req.body.studentId || '').trim()
+    const attendance = String(req.body.attendance || '').trim()
+    if (!['Present', 'Absent', 'Leave'].includes(attendance)) {
+      return res.status(400).json({ success: false, message: 'Choose Present, Absent, or Leave' })
+    }
+    const record = await attendenceRecordModel.findOne({ _id: recordId, InstutionId: req.user.InstutionCode })
+    if (!record) return res.status(404).json({ success: false, message: 'Attendance record not found for this school' })
+    const mark = (record.Attendence || []).find((item) => String(item.StudentId || '').toLowerCase() === studentId.toLowerCase())
+    if (!mark) return res.status(404).json({ success: false, message: 'This student is not on that attendance record' })
+    mark.attendance = attendance
+    record.markModified('Attendence')
+    await record.save()
+    return res.status(200).json({ success: true, message: 'Attendance updated' })
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Could not update the attendance record' })
+  }
+}
+
+const deleteStudentMark = async (req, res) => {
+  try {
+    if (!isSuperAdminUser(req.user)) {
+      return res.status(403).json({ success: false, message: 'Only a super admin can delete an attendance record' })
+    }
+    const recordId = String(req.body.recordId || '').trim()
+    const studentId = String(req.body.studentId || '').trim()
+    const record = await attendenceRecordModel.findOne({ _id: recordId, InstutionId: req.user.InstutionCode })
+    if (!record) return res.status(404).json({ success: false, message: 'Attendance record not found for this school' })
+    const before = Array.isArray(record.Attendence) ? record.Attendence.length : 0
+    record.Attendence = (record.Attendence || []).filter((item) => String(item.StudentId || '').toLowerCase() !== studentId.toLowerCase())
+    if (record.Attendence.length === before) {
+      return res.status(404).json({ success: false, message: 'This student is not on that attendance record' })
+    }
+    if (!record.Attendence.length) await record.deleteOne()
+    else {
+      record.markModified('Attendence')
+      await record.save()
+    }
+    return res.status(200).json({ success: true, message: 'Attendance record deleted' })
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Could not delete the attendance record' })
+  }
+}
+
+const getSession = async (req, res) => {
+  try {
+    if (!(await canReadAttendance(req))) {
+      return res.status(403).json({ success: false, code: 403, message: 'You cannot view attendance' })
+    }
+    const date = canonicalDate(req.query.date || todayKey())
+    const classCode = String(req.query.ClassCode || '')
+    const subject = String(req.query.Subject || '')
+    const sectionCode = String(req.query.SectionCode || '')
+    const records = await attendenceRecordModel.find({
+      InstutionId: req.user.InstutionCode,
+      Class_Code: classCode,
+      Subject: subject,
+    }).lean()
+    const match = records.find((record) => canonicalDate(record.Date) === date && String(record.SectionCode || '') === sectionCode)
+    res.status(200).json({ success: true, code: 200, data: match || null })
+  } catch (error) {
+    res.status(500).json({ success: false, code: 500, message: 'Could not load this attendance' })
+  }
+}
+
 module.exports = {
     index,
     show,
@@ -718,4 +969,8 @@ module.exports = {
     getStudentAttendance,
     getAttendanceOverview,
     getStudentAttendanceSummary,
+    getRegister,
+    getSession,
+    updateStudentMark,
+    deleteStudentMark,
 }

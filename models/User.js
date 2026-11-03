@@ -83,6 +83,12 @@ const  userSchema= new Schema({
   Avatar: {
     type: String,
   },
+  LastLoginAt: {
+    type: Date,
+  },
+  LastLoginIp: {
+    type: String,
+  },
 
 },{timestamps: true});
 
