@@ -36,6 +36,7 @@ const inferFeature = (path, fallbackFeature) => {
   if (cleanPath.includes('/class')) return 'Class Details'
   if (cleanPath.includes('/section')) return 'Section Details'
   if (cleanPath.includes('teacher-salary') || cleanPath.includes('salary_payment') || cleanPath.includes('/salary')) return 'Teacher salary'
+  if (cleanPath.includes('/school-features') || cleanPath.includes('/features')) return 'School features'
   if (cleanPath.includes('/teacher')) return 'Teacher Details'
   if (cleanPath.includes('/homework') || cleanPath.includes('/assignment')) return 'Assignment Details'
   if (cleanPath.includes('/attend')) return 'Attendance Details'

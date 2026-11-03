@@ -687,3 +687,4 @@
 {"level":"error","message":"The study mentor could not answer just now","service":"educational-eternity-api","timestamp":"2026-11-02 22:36:17"}
 {"detail":"{\n    \"error\": {\n        \"message\": \"You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.\",\n        \"type\": \"insufficient_quota\",\n        \"param\": null,\n        \"code\": \"credit_balance_exhausted\"\n    }\n}\n","level":"error","message":"OpenAI chat error","service":"educational-eternity-api","status":429,"timestamp":"2026-11-02 22:36:32"}
 {"level":"error","message":"The study mentor could not answer just now","service":"educational-eternity-api","timestamp":"2026-11-02 22:36:32"}
+{"level":"error","message":"listen EADDRINUSE: address already in use 0.0.0.0:5000","service":"educational-eternity-api","timestamp":"2026-11-03 09:50:11"}
