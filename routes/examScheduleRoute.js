@@ -6,6 +6,7 @@ const authenticate = require('../middleware/authenticate')
 
 // Get all exam schedules (with filters)
 router.get('/get-all-exams', authenticate, examScheduleController.index)
+router.get('/my-timetable', authenticate, examScheduleController.myTimetable)
 
 // Get single exam schedule by ID
 router.get('/get-exam', authenticate, examScheduleController.show)

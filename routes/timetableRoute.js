@@ -8,6 +8,8 @@ router.get('/', authenticate, timetableController.index);
 
 // Get timetable by class and section (for weekly view)
 router.get('/by-class-section', authenticate, timetableController.getByClassSection);
+router.get('/my', authenticate, timetableController.mine);
+router.post('/save-week', authenticate, timetableController.saveWeek);
 
 // Get single timetable
 router.get('/:id', authenticate, timetableController.show);

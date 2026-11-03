@@ -94,18 +94,18 @@ const payable = (payments, month, stored = 0) =>
   assertEq('do not keep yearly in current-only stored', p.outstanding, monthly)
 }
 
-// 4. Stored opening / yearly junk is ignored
+// 4. Total due typed on the student is previous pending, added to this month
 {
   const p = payable([], '2026-06', 2000)
-  assertEq('no billed months → current monthly only', p.outstanding, monthly)
-  assertEq('no billed months → no arrears', p.arrears, 0)
+  assertEq('student total due is arrears', p.arrears, 2000)
+  assertEq('student total due plus current month', p.outstanding, monthly + 2000)
 }
 
-// 5. After generation, stored leftover is ignored
+// 5. After generation, saved total (opening + current month) stays opening + current month
 {
   const p = payable([systemRow('2026-06')], '2026-06', 2000 + monthly)
-  assertEq('generated month ignores stored opening', p.arrears, 0)
-  assertEq('generated month is current monthly only', p.outstanding, monthly)
+  assertEq('opening remains after this month is generated', p.arrears, 2000)
+  assertEq('generated month keeps opening plus current', p.outstanding, monthly + 2000)
 }
 
 // 6. Pay this month, previous unpaid months remain
@@ -151,6 +151,29 @@ const payable = (payments, month, stored = 0) =>
   ]
   const p = payable(payments, '2026-06', monthly)
   assertEq('yearly collection leaves monthly due', p.outstanding, monthly)
+}
+
+// 9. Collecting this month keeps the student total due; collecting pending clears it
+{
+  const openingStored = 2000
+  const cashMonth = paidMonthly('2026-06', monthly)
+  const afterMonth = computeStudentTotalPayable(structure, [cashMonth], {
+    month: '2026-06',
+    storedOutstanding: openingStored + monthly,
+    settlePayment: cashMonth,
+  })
+  assertEq('paying this month leaves student total due', afterMonth.outstanding, openingStored)
+
+  const cashAll = paidMonthly('2026-06', monthly + openingStored, {
+    heads: ['TutionFee', 'LibraryFee', 'PendingFee'],
+    PaidAmount: String(monthly + openingStored),
+  })
+  const afterAll = computeStudentTotalPayable(structure, [cashAll], {
+    month: '2026-06',
+    storedOutstanding: openingStored + monthly,
+    settlePayment: cashAll,
+  })
+  assertEq('paying pending clears student total due', afterAll.outstanding, 0)
 }
 
 console.log('Fee outstanding / baki scenarios passed')

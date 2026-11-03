@@ -119,6 +119,65 @@ const findFeeStructureFromList = (structures, className, section = '') => {
   return pool.find((fs) => !String(fs.Section || '').trim()) || pool[0] || null
 }
 
+const studentUsesTransport = (student) => {
+  const flag = student?.UsesTransport
+  return flag === true || flag === 'true' || flag === 1 || flag === '1'
+}
+
+/**
+ * Transport is not a class fee-structure head.
+ * An assigned student is billed the route fee. Everyone else has no transport fee.
+ */
+const structureForStudent = (structure, student) => {
+  if (!structure) return structure
+  const plain = typeof structure.toObject === 'function' ? structure.toObject() : { ...structure }
+  const assigned = studentUsesTransport(student) ? toAmount(student?.TransportMonthlyFee) : 0
+  return {
+    ...plain,
+    TransportFee: String(assigned),
+    TransportFeeFrequency: 'monthly',
+  }
+}
+
+/** Copy each active route assignment fee onto the student before fee totals are calculated. */
+const stampStudentsWithRouteFees = async (instutionCode, students) => {
+  const list = (Array.isArray(students) ? students : students ? [students] : []).filter(Boolean)
+  const school = String(instutionCode || '').trim()
+  if (!school || !list.length) return list
+  const regs = [
+    ...new Set(list.map((student) => String(student.Registration_Number || '').trim()).filter(Boolean)),
+  ]
+  if (!regs.length) return list
+  const { StudentTransport } = require('../models/transportModel')
+  const rows = await StudentTransport.find({
+    InstutionCode: school,
+    Registration_Number: { $in: regs },
+    Status: true,
+  })
+    .populate('Route_Id', 'Fee')
+    .select('Registration_Number Fee Route_Id')
+    .lean()
+  const feeByReg = new Map()
+  rows.forEach((row) => {
+    const reg = String(row.Registration_Number || '').trim()
+    const routeFee = row.Route_Id && typeof row.Route_Id === 'object' ? row.Route_Id.Fee : 0
+    const fee = toAmount(row.Fee) > 0 ? toAmount(row.Fee) : toAmount(routeFee)
+    if (reg && fee > 0) feeByReg.set(reg, fee)
+  })
+  list.forEach((student) => {
+    const fee = feeByReg.get(String(student.Registration_Number || '').trim())
+    if (!(fee > 0)) return
+    const flag = student.UsesTransport
+    const switchedOff = flag === false || flag === 'false' || flag === 0 || flag === '0'
+    // Switch off keeps a saved route fee from being billed. A blank fee with an
+    // active assignment still gets that route amount.
+    if (switchedOff && toAmount(student.TransportMonthlyFee) > 0) return
+    student.UsesTransport = true
+    student.TransportMonthlyFee = String(fee)
+  })
+  return list
+}
+
 const findFeeStructure = async (feeStructureModel, instutionId, className, section = '') => {
   if (!instutionId || !className) return null
   const classNorm = String(className).trim()
@@ -565,7 +624,11 @@ const monthlyOutstandingAfterPayment = ({
  */
 const computeMonthlyArrears = (structure, payments = [], currentMonth = '') => {
   if (!structure) return 0
-  const monthlyAmount = sumHeadsByFrequency(structure, 'monthly')
+  // Past months keep the class monthly fee. The route fee is added once, on the current month.
+  const monthlyAmount = Math.max(
+    0,
+    sumHeadsByFrequency(structure, 'monthly') - toAmount(structure.TransportFee)
+  )
   if (monthlyAmount <= 0) return 0
 
   const relevant = Array.isArray(payments) ? payments : []
@@ -639,24 +702,94 @@ const computeTotalMonthlyOutstanding = (
 }
 
 /**
+ * Previous pending typed on the student (Total due), on top of the monthly ledger.
+ * A stored total that already matches the ledger, or that only adds the yearly fee, is not added again.
+ */
+const deriveManualOpening = (structure, storedOutstanding, ledger = {}) => {
+  const stored = toAmount(storedOutstanding)
+  if (stored <= 0) return 0
+
+  const arrears = toAmount(ledger.arrears)
+  const currentMonthDue = toAmount(ledger.currentMonthDue)
+  const ledgerTotal = arrears + currentMonthDue
+  const yearly = structure ? sumHeadsByFrequency(structure, 'yearly') : 0
+  const monthly = structure ? sumHeadsByFrequency(structure, 'monthly') : 0
+  const transport = structure ? toAmount(structure.TransportFee) : 0
+
+  if (Math.abs(stored - ledgerTotal) <= 1) return 0
+
+  const extra = stored - ledgerTotal
+  if (extra > 1) {
+    if (yearly > 0 && Math.abs(extra - yearly) <= 1) return 0
+    return extra
+  }
+
+  if (arrears > 0) return 0
+  if (monthly > 0 && Math.abs(stored - monthly) <= 1) return 0
+  if (monthly > 0 && yearly > 0 && Math.abs(stored - (monthly + yearly)) <= 1) return 0
+  if (transport > 0 && Math.abs(stored - Math.max(0, monthly - transport)) <= 1) return 0
+  if (transport > 0 && Math.abs(stored - Math.max(0, ledgerTotal - transport)) <= 1) return 0
+  return stored
+}
+
+/**
  * Amount the student needs to pay now for this school only:
+ * student Total due (previous pending entered on the student) +
  * unpaid SYSTEM-billed previous months + unpaid current-month monthly fee.
  * Yearly heads never enter this number.
- * student.OutstandingAmount is not used — it historically mixed yearly and stale totals.
  */
 const computeStudentTotalPayable = (
   structure,
   payments = [],
-  { excludePaymentId = null, month = '', academicYear = '' } = {}
+  {
+    excludePaymentId = null,
+    month = '',
+    academicYear = '',
+    storedOutstanding = 0,
+    settlePayment = null,
+  } = {}
 ) => {
   if (!structure) {
-    return { arrears: 0, currentMonthDue: 0, outstanding: 0 }
+    const opening = toAmount(storedOutstanding)
+    return {
+      arrears: opening,
+      currentMonthDue: 0,
+      outstanding: opening,
+      manualOpening: opening,
+    }
   }
-  return computeTotalMonthlyOutstanding(structure, payments, {
-    excludePaymentId,
+
+  const relevant = (Array.isArray(payments) ? payments : []).filter(
+    (p) => !excludePaymentId || String(p._id || '') !== String(excludePaymentId)
+  )
+  const openingSource = settlePayment ? relevant.filter((p) => p !== settlePayment) : relevant
+  const ledgerForOpening = computeTotalMonthlyOutstanding(structure, openingSource, {
     month,
     academicYear,
   })
+  let manualOpening = deriveManualOpening(structure, storedOutstanding, ledgerForOpening)
+
+  if (settlePayment) {
+    const { includesPending, monthlySelected, credit } = paymentCreditsMonthlyLedger(
+      settlePayment,
+      structure
+    )
+    if (includesPending) {
+      manualOpening = Math.max(0, manualOpening - Math.max(0, credit - monthlySelected))
+    }
+  }
+
+  const ledger = computeTotalMonthlyOutstanding(structure, relevant, {
+    month,
+    academicYear,
+  })
+  const arrears = ledger.arrears + manualOpening
+  return {
+    arrears,
+    currentMonthDue: ledger.currentMonthDue,
+    outstanding: arrears + ledger.currentMonthDue,
+    manualOpening,
+  }
 }
 
 /** Reduce the student running outstanding after a collection. Yearly heads do not reduce it. */
@@ -776,7 +909,10 @@ const computeInstitutionMonthlyPending = ({
   students.forEach((student) => {
     const reg = String(student.Registration_Number || '').trim()
     if (!reg) return
-    const structure = findFeeStructureFromList(structures, student.Class, student.Section || '')
+    const structure = structureForStudent(
+      findFeeStructureFromList(structures, student.Class, student.Section || ''),
+      student
+    )
     if (!structure) return
 
     currentMonthExpected += sumHeadsByFrequency(structure, 'monthly')
@@ -808,7 +944,10 @@ const sumStudentsPayable = ({
   students.forEach((student) => {
     const reg = String(student.Registration_Number || '').trim()
     if (!reg) return
-    const structure = findFeeStructureFromList(structures, student.Class, student.Section || '')
+    const structure = structureForStudent(
+      findFeeStructureFromList(structures, student.Class, student.Section || ''),
+      student
+    )
     const payments = paymentsByStudent.get(reg) || []
     const { outstanding } = computeStudentTotalPayable(structure, payments, {
       month,
@@ -1034,6 +1173,9 @@ module.exports = {
   normalizeFrequency,
   getHeadFrequency,
   getHeadAmount,
+  studentUsesTransport,
+  structureForStudent,
+  stampStudentsWithRouteFees,
   findFeeStructure,
   findFeeStructureFromList,
   buildHeadsFromStructure,

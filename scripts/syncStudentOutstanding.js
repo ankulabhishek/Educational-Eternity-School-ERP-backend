@@ -11,6 +11,7 @@ const feeStructureModel = require('../models/feeStructureModel')
 const feePaymentModel = require('../models/feePaymentModel')
 const {
   findFeeStructureFromList,
+  structureForStudent,
   computeStudentTotalPayable,
   currentMonthKey,
   toAmount,
@@ -25,7 +26,7 @@ const main = async () => {
 
   const students = await studentModel
     .find({ InstutionCode: instCode, Status: true })
-    .select('First_Name Last_Name Class Section Registration_Number OutstandingAmount InstutionCode Status')
+    .select('First_Name Last_Name Class Section Registration_Number OutstandingAmount InstutionCode Status UsesTransport TransportMonthlyFee')
     .lean()
   const structures = await feeStructureModel.find({ InstutionId: instCode }).lean()
   const schoolRegs = students.map((s) => String(s.Registration_Number || '').trim()).filter(Boolean)
@@ -56,8 +57,14 @@ const main = async () => {
 
   for (const s of students) {
     const reg = String(s.Registration_Number || '').trim()
-    const structure = findFeeStructureFromList(structures, s.Class, s.Section || '')
-    const payable = computeStudentTotalPayable(structure, byReg.get(reg) || [], { month })
+    const structure = structureForStudent(
+      findFeeStructureFromList(structures, s.Class, s.Section || ''),
+      s
+    )
+    const payable = computeStudentTotalPayable(structure, byReg.get(reg) || [], {
+      month,
+      storedOutstanding: s.OutstandingAmount,
+    })
     const stored = toAmount(s.OutstandingAmount)
     sumStored += stored
     sumLedger += payable.outstanding

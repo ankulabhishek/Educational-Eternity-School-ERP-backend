@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const schoolOnboardingController = require('../controller/schoolOnboardingController');
+const institutionControl = require('../controller/institutionControlController');
 const authenticate = require('../middleware/authenticate');
 const { requireSuperAdmin } = require('../middleware/authorize');
 
@@ -37,6 +38,15 @@ router.patch(
   requireSuperAdmin,
   schoolOnboardingController.updateInstitutionStatus
 );
+router.get('/institutions/:code/users', authenticate, requireSuperAdmin, institutionControl.listUsers);
+router.post('/institutions/:code/admins', authenticate, requireSuperAdmin, institutionControl.createAdmin);
+router.patch('/institutions/:code/admins/:userId', authenticate, requireSuperAdmin, institutionControl.updateAdmin);
+router.delete('/institutions/:code/admins/:userId', authenticate, requireSuperAdmin, institutionControl.deleteAdmin);
+router.post('/institutions/:code/users/:userId/password', authenticate, requireSuperAdmin, institutionControl.resetPassword);
+router.delete('/institutions/:code/fees', authenticate, requireSuperAdmin, institutionControl.clearFeeRecords);
+router.get('/institutions/:code', authenticate, requireSuperAdmin, institutionControl.detail);
+router.patch('/institutions/:code', authenticate, requireSuperAdmin, institutionControl.updateInstitution);
+router.delete('/institutions/:code', authenticate, requireSuperAdmin, institutionControl.removeInstitution);
 
 module.exports = router;
 

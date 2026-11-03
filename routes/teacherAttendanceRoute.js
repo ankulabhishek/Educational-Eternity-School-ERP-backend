@@ -10,6 +10,7 @@ router.get('/my-summary', authenticate, teacherAttendanceController.getMyTeacher
 
 // Admin approval endpoints
 router.get('/admin/requests', authenticate, teacherAttendanceController.listTeacherAttendanceRequests)
+router.post('/admin/mark', authenticate, teacherAttendanceController.markTeacherAttendanceByAdmin)
 router.patch(
   '/admin/requests/:id/decision',
   authenticate,
@@ -20,5 +21,7 @@ router.get(
   authenticate,
   teacherAttendanceController.getTeacherAttendanceHistoryForAdmin
 )
+router.patch('/admin/record/:id', authenticate, teacherAttendanceController.updateTeacherAttendanceRecord)
+router.delete('/admin/record/:id', authenticate, teacherAttendanceController.deleteTeacherAttendanceRecord)
 
 module.exports = router
