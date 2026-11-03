@@ -2,7 +2,73 @@ const examScheduleModel = require('../models/examScheduleModel')
 const { getPermissionSet } = require('./permissionAssinment')
 const mongoErrorMessages = require('./mongoErrors.json')
 const classModel = require('../models/classModel')
+const studentModel = require('../models/studentModel')
 const { resolveAcademicYearScope } = require('../utils/academicYearScope')
+const { resolveOwnStudentRegistration } = require('../utils/studentPortalAccess')
+
+const todayKey = () =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date())
+
+const examDayKey = (value) => {
+    const match = String(value || '').match(/^(\d{4}-\d{2}-\d{2})/)
+    if (match) return match[1]
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return ''
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(date)
+}
+
+const statusForExamDay = (dayKey, requested = '') => {
+    if (requested === 'Cancelled') return 'Cancelled'
+    if (!dayKey) return 'Upcoming'
+    return dayKey < todayKey() ? 'Completed' : 'Upcoming'
+}
+
+const minutesOfClock = (label) => {
+    const match = String(label || '').trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i)
+    if (!match) return null
+    let hours = Number(match[1])
+    const minutes = Number(match[2])
+    const meridiem = String(match[3] || '').toUpperCase()
+    if (meridiem === 'PM' && hours < 12) hours += 12
+    if (meridiem === 'AM' && hours === 12) hours = 0
+    if (hours > 23 || minutes > 59) return null
+    return hours * 60 + minutes
+}
+
+const buildExamRecord = (body, school, classRecord) => {
+    const dayKey = examDayKey(body.ExamDate)
+    const examDate = dayKey ? new Date(`${dayKey}T00:00:00.000Z`) : new Date(body.ExamDate)
+    return {
+        InstutionCode: school,
+        ClassCode: body.ClassCode || classRecord.ClassCode,
+        ClassName: body.ClassName || classRecord.ClassName,
+        SectionCode: body.SectionCode || '',
+        SectionName: body.SectionName || '',
+        ExamName: String(body.ExamName || '').trim(),
+        ExamType: String(body.ExamType || '').trim(),
+        Subject: String(body.Subject || '').trim(),
+        ExamDate: examDate,
+        StartTime: String(body.StartTime || '').trim(),
+        EndTime: String(body.EndTime || '').trim(),
+        Duration: body.Duration || '',
+        MaxMarks: Number(body.MaxMarks) > 0 ? Number(body.MaxMarks) : 100,
+        Venue: String(body.Venue || '').trim() || 'Classroom',
+        Status: statusForExamDay(dayKey, body.Status),
+        Instructions: body.Instructions || '',
+        TeacherName: body.TeacherName || '',
+        TeacherId: body.TeacherId || '',
+    }
+}
+
+const paperProblem = (paper) => {
+    if (!String(paper.Subject || '').trim()) return 'Each paper needs a subject'
+    if (!examDayKey(paper.ExamDate)) return `Choose a date for ${paper.Subject || 'each subject'}`
+    const start = minutesOfClock(paper.StartTime)
+    const end = minutesOfClock(paper.EndTime)
+    if (start == null || end == null) return `Choose a start and end time for ${paper.Subject}`
+    if (end <= start) return `End time should be after the start time for ${paper.Subject}`
+    return ''
+}
 
 // Get all exam schedules with filters
 const index = async (req, res, next) => {
@@ -69,7 +135,9 @@ const index = async (req, res, next) => {
                 searchCondition.ExamDate.$gte = new Date(req.query.StartDate)
             }
             if (req.query.EndDate) {
-                searchCondition.ExamDate.$lte = new Date(req.query.EndDate)
+                const end = new Date(req.query.EndDate)
+                end.setUTCHours(23, 59, 59, 999)
+                searchCondition.ExamDate.$lte = end
             }
         } else {
             // Academic year view filter
@@ -210,8 +278,62 @@ const store = async (req, res, next) => {
             })
         }
 
+        if (Array.isArray(req.body.papers)) {
+            if (!req.body.papers.length) {
+                return res.status(400).json({
+                    code: 400,
+                    success: false,
+                    message: 'Add at least one subject',
+                })
+            }
+            if (!req.body.ClassCode || !req.body.ExamName || !req.body.ExamType) {
+                return res.status(400).json({
+                    code: 400,
+                    success: false,
+                    message: 'Exam name, exam type, and class are required',
+                })
+            }
+            const classRecord = await classModel.findOne({
+                ClassCode: req.body.ClassCode,
+                InstutionCode: req.user.InstutionCode,
+            })
+            if (!classRecord) {
+                return res.status(404).json({
+                    code: 404,
+                    success: false,
+                    message: 'Class not found or does not belong to your institution',
+                })
+            }
+            for (const paper of req.body.papers) {
+                const problem = paperProblem({ ...req.body, ...paper })
+                if (problem) {
+                    return res.status(400).json({ code: 400, success: false, message: problem })
+                }
+            }
+            const created = []
+            try {
+                for (const paper of req.body.papers) {
+                    created.push(await examScheduleModel.create(buildExamRecord({
+                        ...req.body,
+                        ...paper,
+                    }, req.user.InstutionCode, classRecord)))
+                }
+            } catch (createError) {
+                if (created.length) {
+                    await examScheduleModel.deleteMany({ _id: { $in: created.map((row) => row._id) } })
+                }
+                throw createError
+            }
+            return res.status(201).json({
+                success: true,
+                message: 'Exam dates saved',
+                code: 201,
+                data: created,
+            })
+        }
+
         // Validate required fields
-        const requiredFields = ['ClassCode', 'ClassName', 'ExamName', 'ExamType', 'Subject', 'ExamDate', 'StartTime', 'EndTime', 'MaxMarks', 'Venue']
+        const requiredFields = ['ClassCode', 'ClassName', 'ExamName', 'ExamType', 'Subject', 'ExamDate', 'StartTime', 'EndTime']
         const missingFields = requiredFields.filter(field => !req.body[field])
 
         if (missingFields.length > 0) {
@@ -252,33 +374,18 @@ const store = async (req, res, next) => {
             })
         }
 
-        // Determine status based on date
-        const now = new Date()
-        let status = 'Upcoming'
-        if (examDate < now) {
-            status = 'Completed'
+        const timingProblem = paperProblem(req.body)
+        if (timingProblem) {
+            return res.status(400).json({
+                code: 400,
+                success: false,
+                message: timingProblem,
+            })
         }
 
-        const examSchedule = new examScheduleModel({
-            InstutionCode: req.user.InstutionCode,
-            ClassCode: req.body.ClassCode,
-            ClassName: req.body.ClassName,
-            SectionCode: req.body.SectionCode || '',
-            SectionName: req.body.SectionName || '',
-            ExamName: req.body.ExamName,
-            ExamType: req.body.ExamType,
-            Subject: req.body.Subject,
-            ExamDate: examDate,
-            StartTime: req.body.StartTime,
-            EndTime: req.body.EndTime,
-            Duration: req.body.Duration || '',
-            MaxMarks: req.body.MaxMarks,
-            Venue: req.body.Venue,
-            Status: req.body.Status || status,
-            Instructions: req.body.Instructions || '',
-            TeacherName: req.body.TeacherName || '',
-            TeacherId: req.body.TeacherId || ''
-        })
+        const examSchedule = new examScheduleModel(
+            buildExamRecord(req.body, req.user.InstutionCode, classRecord)
+        )
 
         await examSchedule.save()
 
@@ -406,14 +513,23 @@ const update = async (req, res, next) => {
             updateData.ExamDate = examDate
 
             // Update status based on new date if not explicitly set
-            if (!req.body.Status) {
-                const now = new Date()
-                if (examDate < now) {
-                    updateData.Status = 'Completed'
-                } else {
-                    updateData.Status = 'Upcoming'
-                }
+            if (!req.body.Status || req.body.Status !== 'Cancelled') {
+                updateData.Status = statusForExamDay(examDayKey(examDate))
             }
+        }
+
+        const timingProblem = paperProblem({
+            Subject: updateData.Subject || existingExam.Subject,
+            ExamDate: updateData.ExamDate || existingExam.ExamDate,
+            StartTime: updateData.StartTime || existingExam.StartTime,
+            EndTime: updateData.EndTime || existingExam.EndTime,
+        })
+        if (timingProblem) {
+            return res.status(400).json({
+                code: 400,
+                success: false,
+                message: timingProblem,
+            })
         }
 
         const updatedExam = await examScheduleModel.findByIdAndUpdate(
@@ -511,11 +627,78 @@ const destroy = async (req, res, next) => {
     }
 }
 
+const myTimetable = async (req, res) => {
+    try {
+        if (!req.user?.InstutionCode) {
+            return res.status(401).json({
+                code: 401,
+                success: false,
+                message: 'User authentication required',
+            })
+        }
+        const resolved = resolveOwnStudentRegistration(req)
+        if (resolved.error) {
+            return res.status(resolved.error.status).json({
+                code: resolved.error.status,
+                success: false,
+                message: resolved.error.message,
+            })
+        }
+        if (String(req.user.UserType || '').trim() !== 'Student') {
+            return res.status(403).json({
+                code: 403,
+                success: false,
+                message: 'This timetable is for students',
+            })
+        }
+        const student = await studentModel.findOne({
+            InstutionCode: req.user.InstutionCode,
+            Registration_Number: resolved.registrationNumber,
+        }).select('Class Class_Code Section SectionCode Status').lean()
+        if (!student || student.Status === false) {
+            return res.status(404).json({
+                code: 404,
+                success: false,
+                message: 'Student record was not found',
+            })
+        }
+        const classValues = [student.Class, student.Class_Code].map((value) => String(value || '').trim()).filter(Boolean)
+        const exams = await examScheduleModel.find({
+            InstutionCode: req.user.InstutionCode,
+            Status: { $ne: 'Cancelled' },
+            $or: [
+                { ClassName: { $in: classValues } },
+                { ClassCode: { $in: classValues } },
+            ],
+        }).sort({ ExamDate: 1, StartTime: 1 }).lean()
+        const sectionValues = [student.Section, student.SectionCode]
+            .map((value) => String(value || '').trim().toLowerCase())
+            .filter(Boolean)
+        const visible = exams.filter((exam) => {
+            const examSection = String(exam.SectionName || exam.SectionCode || '').trim().toLowerCase()
+            return !examSection || sectionValues.includes(examSection)
+        })
+        return res.status(200).json({
+            success: true,
+            message: 'Exam timetable retrieved successfully',
+            code: 200,
+            data: visible,
+        })
+    } catch (error) {
+        return res.status(500).json({
+            success: false,
+            code: 500,
+            message: error.message || 'Failed to fetch the exam timetable',
+        })
+    }
+}
+
 module.exports = {
     index,
     show,
     store,
     update,
-    destroy
+    destroy,
+    myTimetable,
 }
 

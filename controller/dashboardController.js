@@ -166,6 +166,8 @@ const getDashboardData = async (req, res, next) => {
         let onlineCount = 0;
         let cashAmount = 0;
         let onlineAmount = 0;
+        let upiAmount = 0;
+        let bankAmount = 0;
         let totalAmount = 0;
         let thisMonthAmount = 0;
         let lastMonthAmount = 0;
@@ -235,13 +237,18 @@ const getDashboardData = async (req, res, next) => {
                 });
                 
                 // Calculate cash/online breakdown (for display)
-                if (payment.PaymentMode === 'Cash') {
+                const mode = String(payment.PaymentMode || '').toLowerCase().replace(/[\s_-]/g, '');
+                if (mode === 'cash') {
                     cashcount++;
                     cashAmount += paidAmt;
-                }
-                if (payment.PaymentMode === 'Online') {
+                } else if (mode === 'upi' || mode === 'qr') {
+                    upiAmount += paidAmt;
+                } else if (mode === 'online') {
                     onlineCount++;
                     onlineAmount += paidAmt;
+                    upiAmount += paidAmt;
+                } else {
+                    bankAmount += paidAmt;
                 }
                 
                 // Calculate monthly amounts (for display)
@@ -619,7 +626,8 @@ const getDashboardData = async (req, res, next) => {
             totalMarksheets: marksheets.length,
             passCount: marksheets.filter(m => m.Result === 'Pass' || m.Result === 'PASS').length,
             failCount: marksheets.filter(m => m.Result === 'Fail' || m.Result === 'FAIL').length,
-            averagePercentage: 0
+            averagePercentage: 0,
+            totalObtainedMarks: 0,
         };
 
         if (marksheets.length > 0) {
@@ -633,6 +641,41 @@ const getDashboardData = async (req, res, next) => {
                 }
             });
             academicStats.averagePercentage = (totalPercentage / marksheets.length).toFixed(2);
+            academicStats.totalObtainedMarks = marksheets.reduce((sum, sheet) => {
+                const value = parseFloat(String(sheet.Obtained_Marks ?? '').replace(/,/g, ''));
+                return sum + (Number.isFinite(value) ? value : 0);
+            }, 0);
+        }
+
+        const subjectNames = new Set();
+        classRecord.forEach((schoolClass) => {
+            const rows = Array.isArray(schoolClass.Subject_List_Teacher_Code) ? schoolClass.Subject_List_Teacher_Code : [];
+            rows.forEach((row) => {
+                const name = String(row?.Subject || '').trim().toLowerCase();
+                if (name) subjectNames.add(name);
+            });
+        });
+
+        const monthlyCollections = [];
+        const monthCursor = new Date();
+        monthCursor.setDate(1);
+        monthCursor.setHours(0, 0, 0, 0);
+        monthCursor.setMonth(monthCursor.getMonth() - 11);
+        for (let index = 0; index < 12; index += 1) {
+            const start = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + index, 1);
+            const end = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + index + 1, 1);
+            let amount = 0;
+            allInstitutionFeePayments.forEach((payment) => {
+                const success = payment.Status === 'Success' || payment.Status === 'success';
+                if (!success) return;
+                const when = payment.createdAt ? new Date(payment.createdAt) : (payment.Date ? new Date(payment.Date) : null);
+                if (!when || Number.isNaN(when.getTime()) || when < start || when >= end) return;
+                amount += parseAmount(payment.PaidAmount);
+            });
+            monthlyCollections.push({
+                label: start.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+                amount: Math.round(amount),
+            });
         }
 
         // Get sections count
@@ -668,6 +711,10 @@ const getDashboardData = async (req, res, next) => {
             totalPaymentCount: paymentMode.length,
             cashAmount: cashAmount,
             onlineAmount: onlineAmount,
+            upiAmount: upiAmount,
+            bankAmount: bankAmount,
+            monthlyCollections: monthlyCollections,
+            totalSubjects: subjectNames.size,
             totalAmount: totalAmount,
             thisMonthAmount: thisMonthAmount,
             lastMonthAmount: lastMonthAmount,

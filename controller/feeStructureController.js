@@ -1,3 +1,4 @@
+const mongoose = require('mongoose')
 const { response } = require('express')
 const feeStructureModel = require('../models/feeStructureModel')
 const ClassModel = require('../models/classModel')
@@ -49,7 +50,6 @@ const buildStructurePayload = (body, existing = null) => {
   const uniform = readStandardAmount(body, 'UniformFee', existing?.UniformFee ?? 0)
   const prospectus = readStandardAmount(body, 'ProspectusFee', existing?.ProspectusFee ?? 0)
   const admission = readStandardAmount(body, 'AdmissionFee', existing?.AdmissionFee ?? 0)
-  const transport = readStandardAmount(body, 'TransportFee', existing?.TransportFee ?? 0)
   const otherFeeJson = resolveOtherFeeJson(body, existing)
   const frequencyPayload = buildFrequencyPayload(body, existing || {})
 
@@ -61,7 +61,7 @@ const buildStructurePayload = (body, existing = null) => {
     UniformFee: uniform.toString(),
     ProspectusFee: prospectus.toString(),
     AdmissionFee: admission.toString(),
-    TransportFee: transport.toString(),
+    TransportFee: '0',
     OtherFee: otherFeeJson,
     ...frequencyPayload,
   }
@@ -80,7 +80,7 @@ const buildStructurePayload = (body, existing = null) => {
     UniformFee: uniform.toString(),
     ProspectusFee: prospectus.toString(),
     AdmissionFee: admission.toString(),
-    TransportFee: transport.toString(),
+    TransportFee: '0',
     OtherFee: otherFeeJson,
     Total: totalfee.toString(),
     MonthlyTotal: monthlyTotal.toString(),
@@ -238,8 +238,30 @@ const update = async (req, res) => {
   }
 }
 
+const remove = async (req, res) => {
+  try {
+    const role = String(req.user?.UserType || '').trim().toLowerCase().replace(/\s+/g, '')
+    if (role !== 'superadmin') {
+      return res.status(403).json({ success: false, message: 'Only a super admin can delete a fee structure' })
+    }
+    const id = String(req.body?._id || '').trim()
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Fee structure is missing' })
+    }
+    const existing = await feeStructureModel.findById(id)
+    if (!existing || existing.InstutionId !== req.user.InstutionCode) {
+      return res.status(404).json({ success: false, message: 'Fee structure not found for this school' })
+    }
+    await existing.deleteOne()
+    return res.status(200).json({ success: true, message: 'Fee structure deleted' })
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message || 'Could not delete the fee structure' })
+  }
+}
+
 module.exports = {
   store,
   show,
   update,
+  remove,
 }

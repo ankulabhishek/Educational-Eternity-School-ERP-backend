@@ -7,6 +7,11 @@ const IST_TIMEZONE = 'Asia/Kolkata'
 const toDateKey = (date = new Date()) =>
   new Intl.DateTimeFormat('en-CA', { timeZone: IST_TIMEZONE }).format(date)
 
+const isSuperAdminUser = (userType) => {
+  const v = String(userType || '').trim().toLowerCase().replace(/\s+/g, '')
+  return v === 'superadmin'
+}
+
 const isAdminUser = (userType) => {
   const v = String(userType || '')
     .trim()
@@ -103,8 +108,15 @@ const markTeacherAttendance = async (req, res) => {
       })
     }
 
-    const now = new Date()
-    const attendanceDate = toDateKey(now)
+    const requestedDate = String(req.body?.AttendanceDate || '').trim()
+    const requestedTime = String(req.body?.AttendanceTime || '').trim()
+    const attendanceDate = /^\d{4}-\d{2}-\d{2}$/.test(requestedDate) ? requestedDate : toDateKey()
+    const now = /^\d{2}:\d{2}$/.test(requestedTime)
+      ? new Date(`${attendanceDate}T${requestedTime}:00+05:30`)
+      : new Date()
+    if (Number.isNaN(now.getTime())) {
+      return res.status(400).json({ success: false, message: 'Choose a valid date and time' })
+    }
     const teacherName =
       `${user.FirstName || ''} ${user.LastName || ''}`.trim() ||
       String(user.Name || user.UserName || teacherMemberId)
@@ -253,8 +265,16 @@ const getMyTeacherAttendanceSummary = async (req, res) => {
 
     const approvedRecords = await teacherAttendanceModel.find(cond).lean()
     const presentCount = approvedRecords.filter((r) => r.FinalAttendanceStatus === 'Present').length
-    const absentCount = approvedRecords.filter((r) => r.FinalAttendanceStatus === 'Absent').length
+    const leaveCount = approvedRecords.filter((r) => r.FinalAttendanceStatus === 'Leave').length
     const workingDays = await getWorkingDaysCount(instutionCode, fromDate, toDate)
+    const pendingCount = await teacherAttendanceModel.countDocuments({
+      InstutionCode: instutionCode,
+      TeacherMemberId: teacherMemberId,
+      RequestStatus: 'Pending',
+      ...(fromDate || toDate
+        ? { AttendanceDate: { ...(fromDate ? { $gte: fromDate } : {}), ...(toDate ? { $lte: toDate } : {}) } }
+        : {}),
+    })
 
     return res.status(200).json({
       success: true,
@@ -262,7 +282,9 @@ const getMyTeacherAttendanceSummary = async (req, res) => {
       message: 'Teacher attendance summary fetched successfully.',
       data: {
         presentCount,
-        absentCount,
+        leaveCount,
+        pendingCount,
+        absentCount: Math.max(0, workingDays - presentCount - leaveCount),
         workingDays,
         approvedCount: approvedRecords.length,
       },
@@ -415,6 +437,65 @@ const decideTeacherAttendanceRequest = async (req, res) => {
   }
 }
 
+const markTeacherAttendanceByAdmin = async (req, res) => {
+  try {
+    if (!isAdminUser(req.user?.UserType)) {
+      return res.status(403).json({ success: false, code: 403, message: 'Only admin can mark teacher attendance directly.' })
+    }
+    const teacherMemberId = String(req.body.TeacherMemberId || '').trim()
+    const teacherName = String(req.body.TeacherName || '').trim()
+    const attendanceDate = String(req.body.AttendanceDate || toDateKey()).trim()
+    const attendanceTime = String(req.body.AttendanceTime || '').trim()
+    if (!teacherMemberId || !/^\d{4}-\d{2}-\d{2}$/.test(attendanceDate)) {
+      return res.status(400).json({ success: false, message: 'Choose a teacher and a date' })
+    }
+    if (!/^\d{2}:\d{2}$/.test(attendanceTime)) {
+      return res.status(400).json({ success: false, message: 'Choose the time as well' })
+    }
+    const punchAt = new Date(`${attendanceDate}T${attendanceTime}:00+05:30`)
+    if (Number.isNaN(punchAt.getTime())) {
+      return res.status(400).json({ success: false, message: 'That date and time are not valid' })
+    }
+    const existing = await teacherAttendanceModel.findOne({
+      InstutionCode: req.user.InstutionCode,
+      TeacherMemberId: teacherMemberId,
+      AttendanceDate: attendanceDate,
+    })
+    const saved = await teacherAttendanceModel.findOneAndUpdate(
+      {
+        InstutionCode: req.user.InstutionCode,
+        TeacherMemberId: teacherMemberId,
+        AttendanceDate: attendanceDate,
+      },
+      {
+        $set: {
+          InstutionCode: req.user.InstutionCode,
+          TeacherMemberId: teacherMemberId,
+          TeacherName: teacherName || existing?.TeacherName || teacherMemberId,
+          TeacherUserType: 'Teacher',
+          AttendanceDate: attendanceDate,
+          PunchInAt: punchAt,
+          RequestedDayType: 'Full Day',
+          RequestedHalf: '',
+          RequestStatus: 'Approved',
+          FinalAttendanceStatus: 'Present',
+          ApprovedDayType: 'Full Day',
+          ApprovedHalf: '',
+          MarkedBy: 'Admin',
+          AdminRemark: 'Marked present by admin',
+          ApprovedByMemberId: String(req.user.MemberId || ''),
+          ApprovedByName: `${req.user.FirstName || ''} ${req.user.LastName || ''}`.trim(),
+          ApprovedAt: new Date(),
+        },
+      },
+      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
+    )
+    return res.status(200).json({ success: true, message: 'Marked present', data: saved })
+  } catch (error) {
+    return res.status(500).json({ success: false, message: safeServerError(error) })
+  }
+}
+
 const getTeacherAttendanceHistoryForAdmin = async (req, res) => {
   try {
     if (!isAdminUser(req.user?.UserType)) {
@@ -453,7 +534,8 @@ const getTeacherAttendanceHistoryForAdmin = async (req, res) => {
 
     const approved = records.filter((r) => r.RequestStatus === 'Approved')
     const presentCount = approved.filter((r) => r.FinalAttendanceStatus === 'Present').length
-    const absentCount = approved.filter((r) => r.FinalAttendanceStatus === 'Absent').length
+    const leaveCount = approved.filter((r) => r.FinalAttendanceStatus === 'Leave').length
+    const workingDays = await getWorkingDaysCount(req.user.InstutionCode, fromDate, toDate)
 
     return res.status(200).json({
       success: true,
@@ -461,7 +543,9 @@ const getTeacherAttendanceHistoryForAdmin = async (req, res) => {
       message: 'Teacher history fetched successfully.',
       summary: {
         presentCount,
-        absentCount,
+        leaveCount,
+        workingDays,
+        absentCount: Math.max(0, workingDays - presentCount - leaveCount),
         approvedCount: approved.length,
         pendingCount: records.filter((r) => r.RequestStatus === 'Pending').length,
       },
@@ -476,11 +560,81 @@ const getTeacherAttendanceHistoryForAdmin = async (req, res) => {
   }
 }
 
+const updateTeacherAttendanceRecord = async (req, res) => {
+  try {
+    if (!isSuperAdminUser(req.user?.UserType)) {
+      return res.status(403).json({ success: false, message: 'Only a super admin can change a teacher attendance record' })
+    }
+    const row = await teacherAttendanceModel.findOne({
+      _id: req.params.id,
+      InstutionCode: req.user.InstutionCode,
+    })
+    if (!row) return res.status(404).json({ success: false, message: 'Attendance record not found for this school' })
+    const body = req.body || {}
+    if (body.AttendanceDate) row.AttendanceDate = String(body.AttendanceDate).slice(0, 10)
+    if (body.AttendanceTime) {
+      const stamp = new Date(`${row.AttendanceDate}T${body.AttendanceTime}:00+05:30`)
+      if (Number.isNaN(stamp.getTime())) {
+        return res.status(400).json({ success: false, message: 'Enter a valid time' })
+      }
+      row.PunchInAt = stamp
+    }
+    const status = String(body.FinalAttendanceStatus || '').trim()
+    if (status) {
+      if (!['Pending', 'Present', 'Absent', 'Leave'].includes(status)) {
+        return res.status(400).json({ success: false, message: 'Choose a valid attendance result' })
+      }
+      row.FinalAttendanceStatus = status
+      row.RequestStatus = status === 'Pending' ? 'Pending' : 'Approved'
+    }
+    if (body.DayType) {
+      row.RequestedDayType = body.DayType
+      row.ApprovedDayType = body.DayType
+    }
+    if (body.Half !== undefined) {
+      row.RequestedHalf = body.Half || ''
+      row.ApprovedHalf = body.Half || ''
+    }
+    if (body.Note !== undefined) row.AdminRemark = String(body.Note || '')
+    row.MarkedBy = 'Admin'
+    row.ApprovedByName = `${req.user.FirstName || ''} ${req.user.LastName || ''}`.trim() || req.user.UserName || 'Super Admin'
+    row.ApprovedByMemberId = req.user.MemberId || ''
+    row.ApprovedAt = new Date()
+    await row.save()
+    return res.status(200).json({ success: true, message: 'Teacher attendance updated', data: row })
+  } catch (error) {
+    const duplicate = error?.code === 11000
+    return res.status(duplicate ? 400 : 500).json({
+      success: false,
+      message: duplicate ? 'This teacher already has attendance on that date' : 'Could not update the attendance record',
+    })
+  }
+}
+
+const deleteTeacherAttendanceRecord = async (req, res) => {
+  try {
+    if (!isSuperAdminUser(req.user?.UserType)) {
+      return res.status(403).json({ success: false, message: 'Only a super admin can delete a teacher attendance record' })
+    }
+    const row = await teacherAttendanceModel.findOneAndDelete({
+      _id: req.params.id,
+      InstutionCode: req.user.InstutionCode,
+    })
+    if (!row) return res.status(404).json({ success: false, message: 'Attendance record not found for this school' })
+    return res.status(200).json({ success: true, message: 'Teacher attendance deleted' })
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Could not delete the attendance record' })
+  }
+}
+
 module.exports = {
   markTeacherAttendance,
   getMyTeacherAttendanceHistory,
   getMyTeacherAttendanceSummary,
   listTeacherAttendanceRequests,
   decideTeacherAttendanceRequest,
+  markTeacherAttendanceByAdmin,
   getTeacherAttendanceHistoryForAdmin,
+  updateTeacherAttendanceRecord,
+  deleteTeacherAttendanceRecord,
 }
