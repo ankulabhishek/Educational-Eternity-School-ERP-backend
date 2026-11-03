@@ -15,6 +15,10 @@ router.post(
 )
 router.get('/studentData', authenticate, attendenceRecordController.getAllStudent)
 router.get('/student-attendance', authenticate, attendenceRecordController.getStudentAttendance)
+router.get('/register', authenticate, attendenceRecordController.getRegister)
+router.get('/session', authenticate, attendenceRecordController.getSession)
+router.patch('/mark', authenticate, attendenceRecordController.updateStudentMark)
+router.delete('/mark', authenticate, attendenceRecordController.deleteStudentMark)
 
 // Analytics
 router.get('/analytics/overview', authenticate, attendenceRecordController.getAttendanceOverview)

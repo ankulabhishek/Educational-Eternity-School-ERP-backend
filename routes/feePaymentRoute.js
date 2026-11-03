@@ -30,6 +30,7 @@ router.post(
 )
 router.post('/record-admission-fee', authenticate, feePaymentController.storeAdmissionFee)
 router.get('/get-all-payment', authenticate, feePaymentController.showAllPayment)
+router.delete('/delete-payment', authenticate, feePaymentController.removePayment)
 
 router.post(
   '/student-submit-payment',

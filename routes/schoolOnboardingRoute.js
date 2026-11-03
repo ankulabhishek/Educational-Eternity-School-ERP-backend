@@ -44,6 +44,7 @@ router.patch('/institutions/:code/admins/:userId', authenticate, requireSuperAdm
 router.delete('/institutions/:code/admins/:userId', authenticate, requireSuperAdmin, institutionControl.deleteAdmin);
 router.post('/institutions/:code/users/:userId/password', authenticate, requireSuperAdmin, institutionControl.resetPassword);
 router.delete('/institutions/:code/fees', authenticate, requireSuperAdmin, institutionControl.clearFeeRecords);
+router.patch('/institutions/:code/features', authenticate, requireSuperAdmin, institutionControl.updateFeatures);
 router.get('/institutions/:code', authenticate, requireSuperAdmin, institutionControl.detail);
 router.patch('/institutions/:code', authenticate, requireSuperAdmin, institutionControl.updateInstitution);
 router.delete('/institutions/:code', authenticate, requireSuperAdmin, institutionControl.removeInstitution);
